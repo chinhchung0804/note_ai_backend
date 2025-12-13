@@ -7,7 +7,7 @@ from typing import Any
 
 from crewai import Agent, Crew, Task
 
-from app.agents.llm_config import get_gemini_llm
+from app.agents.llm_config import get_processing_llm
 
 ocr_agent = Agent(
     role='OCR Processing Agent',
@@ -18,7 +18,7 @@ ocr_agent = Agent(
         'Nhiệm vụ của bạn là nhận raw text từ Tesseract OCR và cải thiện chất lượng.'
     ),
     verbose=False,
-    llm=get_gemini_llm(),
+    llm=get_processing_llm(),
     allow_delegation=False
 )
 

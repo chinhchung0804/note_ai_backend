@@ -9,13 +9,26 @@ from app.core.preprocessor import (
     clean_text
 )
 from app.core.output_builder import build_output
-from app.agents.summarizer_agent import generate_learning_assets
+from app.agents.summarizer_agent import (
+    generate_learning_assets,
+    generate_vocab_bundle,
+)
 from app.agents.reviewer_agent import review_text
 from app.agents.ocr_agent import process_ocr_text
 from app.agents.text_agent import process_and_normalize_text
 import asyncio
 
-async def process_text(text: str, db: Optional[Session] = None, use_rag: bool = True):
+import json
+import random
+
+
+async def process_text(
+    text: str,
+    db: Optional[Session] = None,
+    use_rag: bool = True,
+    content_type: Optional[str] = None,
+    checked_vocab_items: Optional[str] = None,
+):
     """
     Xử lý text input trực tiếp từ người dùng
     Workflow: Clean → Summarize → Build Output
@@ -25,18 +38,33 @@ async def process_text(text: str, db: Optional[Session] = None, use_rag: bool = 
         db: Database session (optional, để dùng RAG)
         use_rag: Có sử dụng RAG để cải thiện prompt không (default: True)
     """
-    # Step 1: Clean text
     txt = clean_text(text)
     
-    # Step 2: Generate learning assets (summaries, questions, MCQs)
+    if content_type == 'checklist':
+        vocab_bundle = await generate_vocab_bundle(txt, checked_vocab_items)
+        return build_output(
+            summaries=None,
+            review={'valid': True, 'notes': 'Vocab checklist từ text'},
+            raw_text=txt,
+            processed_text=txt,
+            questions=[],
+            mcqs={},
+            vocab_story=vocab_bundle['vocab_story'],
+            vocab_mcqs=vocab_bundle['vocab_mcqs'],
+            flashcards=vocab_bundle['flashcards'],
+            mindmap=vocab_bundle['mindmap'],
+            summary_table=vocab_bundle['summary_table'],
+            cloze_tests=vocab_bundle.get('cloze_tests'),
+            match_pairs=vocab_bundle.get('match_pairs'),
+        )
+
     learning_assets = await generate_learning_assets(
         raw_text=txt,
         db=db,
         file_type='text',
         use_rag=use_rag
     )
-    
-    # Step 3: Build output
+
     return build_output(
         summaries=learning_assets.get('summaries'),
         review={'valid': True, 'notes': 'Text input trực tiếp'},
@@ -123,11 +151,16 @@ async def _extract_text_from_upload(upload_file):
             os.remove(file_path)
         except:
             pass
-        # Reset pointer để có thể đọc lại ở nơi khác nếu cần
         await upload_file.seek(0)
 
 
-async def process_file(upload_file, db: Optional[Session] = None, use_rag: bool = True):
+async def process_file(
+    upload_file,
+    db: Optional[Session] = None,
+    use_rag: bool = True,
+    content_type: Optional[str] = None,
+    checked_vocab_items: Optional[str] = None,
+):
     """
     Xử lý file upload đơn lẻ (giữ behaviour cũ để không phá API hiện tại)
     """
@@ -139,6 +172,27 @@ async def process_file(upload_file, db: Optional[Session] = None, use_rag: bool 
             review=extracted['review'],
             raw_text='',
             processed_text=''
+        )
+
+    if content_type == 'checklist':
+        vocab_bundle = await generate_vocab_bundle(
+            extracted['processed_text'],
+            checked_vocab_items
+        )
+        return build_output(
+            summaries=None,
+            review=extracted['review'],
+            raw_text=extracted['raw_text'],
+            processed_text=extracted['processed_text'],
+            questions=[],
+            mcqs={},
+            vocab_story=vocab_bundle['vocab_story'],
+            vocab_mcqs=vocab_bundle['vocab_mcqs'],
+            flashcards=vocab_bundle['flashcards'],
+            mindmap=vocab_bundle['mindmap'],
+            summary_table=vocab_bundle['summary_table'],
+            cloze_tests=vocab_bundle.get('cloze_tests'),
+            match_pairs=vocab_bundle.get('match_pairs'),
         )
 
     learning_assets = await generate_learning_assets(
@@ -162,7 +216,9 @@ async def process_combined_inputs(
     text_note: Optional[str],
     files: Optional[List],
     db: Optional[Session] = None,
-    use_rag: bool = True
+    use_rag: bool = True,
+    content_type: Optional[str] = None,
+    checked_vocab_items: Optional[str] = None,
 ):
     """
     Xử lý đồng thời nhiều nguồn input (text + nhiều file) rồi gộp lại thành một ghi chú hoàn chỉnh.
@@ -217,6 +273,28 @@ async def process_combined_inputs(
         use_rag=use_rag
     )
 
+    if content_type == 'checklist':
+        vocab_bundle = await generate_vocab_bundle(
+            combined_text,
+            checked_vocab_items
+        )
+        return build_output(
+            summaries=learning_assets.get('summaries'),
+            review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input - checklist'},
+            raw_text=combined_text,
+            processed_text=combined_text,
+            questions=learning_assets.get('questions'),
+            mcqs=learning_assets.get('mcqs'),
+            sources=sources,
+            vocab_story=vocab_bundle['vocab_story'],
+            vocab_mcqs=vocab_bundle['vocab_mcqs'],
+            flashcards=vocab_bundle['flashcards'],
+            mindmap=vocab_bundle['mindmap'],
+            summary_table=vocab_bundle['summary_table'],
+            cloze_tests=vocab_bundle.get('cloze_tests'),
+            match_pairs=vocab_bundle.get('match_pairs'),
+        )
+
     return build_output(
         summaries=learning_assets.get('summaries'),
         review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input'},
@@ -226,3 +304,5 @@ async def process_combined_inputs(
         mcqs=learning_assets.get('mcqs'),
         sources=sources
     )
+
+

@@ -2,6 +2,7 @@
 Feedback Service - Quản lý feedback và RAG cho prompt improvement
 """
 from typing import Optional, List, Dict, Any
+from sqlalchemy.exc import OperationalError, InterfaceError
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func, and_
 from datetime import datetime
@@ -52,7 +53,6 @@ class FeedbackService:
         if not user:
             raise ValueError(f"User không tồn tại: {user_id}")
         
-        # Validate rating
         if rating < 1 or rating > 5:
             raise ValueError("Rating phải từ 1-5")
         
@@ -179,18 +179,15 @@ class FeedbackService:
                 'neutral_count': 0
             }
         
-        # Average rating
         avg_rating = db.query(func.avg(Feedback.rating)).filter(
             query.whereclause if hasattr(query, 'whereclause') else True
         ).scalar() or 0
         
-        # Rating distribution
         rating_dist = {}
         for rating in range(1, 6):
             count = query.filter(Feedback.rating == rating).count()
             rating_dist[rating] = count
         
-        # Feedback type counts
         positive_count = query.filter(Feedback.feedback_type == 'positive').count()
         negative_count = query.filter(Feedback.feedback_type == 'negative').count()
         neutral_count = query.filter(Feedback.feedback_type == 'neutral').count()
@@ -217,62 +214,59 @@ class FeedbackService:
             - common_disliked_aspects: Aspects users thường không thích
             - suggestions: Common suggestions
         """
-        # Get positive feedbacks với notes
-        positive_feedbacks = FeedbackService.get_positive_feedbacks(db, limit=limit)
-        positive_examples = []
-        for fb in positive_feedbacks:
-            note = db.query(Note).filter(Note.id == fb.note_id).first()
-            if note and note.summary:
-                positive_examples.append({
-                    'summary': note.summary,
-                    'raw_text': note.raw_text[:200] if note.raw_text else None,  # First 200 chars
-                    'rating': fb.rating,
-                    'comment': fb.comment,
-                    'liked_aspects': fb.liked_aspects
-                })
-        
-        # Get negative feedbacks với notes
-        negative_feedbacks = FeedbackService.get_negative_feedbacks(db, limit=limit)
-        negative_examples = []
-        for fb in negative_feedbacks:
-            note = db.query(Note).filter(Note.id == fb.note_id).first()
-            if note and note.summary:
-                negative_examples.append({
-                    'summary': note.summary,
-                    'raw_text': note.raw_text[:200] if note.raw_text else None,
-                    'rating': fb.rating,
-                    'comment': fb.comment,
-                    'disliked_aspects': fb.disliked_aspects,
-                    'suggestions': fb.suggestions
-                })
-        
-        # Common liked aspects
-        all_liked = []
-        for fb in positive_feedbacks:
-            if fb.liked_aspects:
-                all_liked.extend(fb.liked_aspects)
-        
-        # Common disliked aspects
-        all_disliked = []
-        for fb in negative_feedbacks:
-            if fb.disliked_aspects:
-                all_disliked.extend(fb.disliked_aspects)
-        
-        # Common suggestions
-        all_suggestions = []
-        for fb in negative_feedbacks:
-            if fb.suggestions:
-                all_suggestions.append(fb.suggestions)
-        
-        return {
-            'positive_examples': positive_examples,
-            'negative_examples': negative_examples,
-            'common_liked_aspects': list(set(all_liked))[:10],  # Top 10 unique
-            'common_disliked_aspects': list(set(all_disliked))[:10],
-            'suggestions': all_suggestions[:10]
-        }
+        try:
+            positive_feedbacks = FeedbackService.get_positive_feedbacks(db, limit=limit)
+            positive_examples = []
+            for fb in positive_feedbacks:
+                note = db.query(Note).filter(Note.id == fb.note_id).first()
+                if note and note.summary:
+                    positive_examples.append({
+                        'summary': note.summary,
+                        'raw_text': note.raw_text[:200] if note.raw_text else None,  
+                        'rating': fb.rating,
+                        'comment': fb.comment,
+                        'liked_aspects': fb.liked_aspects
+                    })
+            
+            negative_feedbacks = FeedbackService.get_negative_feedbacks(db, limit=limit)
+            negative_examples = []
+            for fb in negative_feedbacks:
+                note = db.query(Note).filter(Note.id == fb.note_id).first()
+                if note and note.summary:
+                    negative_examples.append({
+                        'summary': note.summary,
+                        'raw_text': note.raw_text[:200] if note.raw_text else None,
+                        'rating': fb.rating,
+                        'comment': fb.comment,
+                        'disliked_aspects': fb.disliked_aspects,
+                        'suggestions': fb.suggestions
+                    })
+            
+            all_liked = []
+            for fb in positive_feedbacks:
+                if fb.liked_aspects:
+                    all_liked.extend(fb.liked_aspects)
+            
+            all_disliked = []
+            for fb in negative_feedbacks:
+                if fb.disliked_aspects:
+                    all_disliked.extend(fb.disliked_aspects)
+            
+            all_suggestions = []
+            for fb in negative_feedbacks:
+                if fb.suggestions:
+                    all_suggestions.append(fb.suggestions)
+            
+            return {
+                'positive_examples': positive_examples,
+                'negative_examples': negative_examples,
+                'common_liked_aspects': list(set(all_liked))[:10], 
+                'common_disliked_aspects': list(set(all_disliked))[:10],
+                'suggestions': all_suggestions[:10]
+            }
+        except (OperationalError, InterfaceError) as e:
+            print(f"[feedback_service] Skip improvement insights due to DB error: {e}")
+            return {}
 
-
-# Global instance
 feedback_service = FeedbackService()
 

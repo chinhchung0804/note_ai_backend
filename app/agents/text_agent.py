@@ -7,7 +7,7 @@ from typing import Any
 
 from crewai import Agent, Crew, Task
 
-from app.agents.llm_config import get_gemini_llm
+from app.agents.llm_config import get_processing_llm
 
 text_agent = Agent(
     role='Text Processing Agent',
@@ -18,7 +18,7 @@ text_agent = Agent(
         'Nhiệm vụ của bạn là nhận text đã được OCR Agent cải thiện và chuẩn hóa thêm.'
     ),
     verbose=False,
-    llm=get_gemini_llm(),
+    llm=get_processing_llm(),
     allow_delegation=False
 )
 

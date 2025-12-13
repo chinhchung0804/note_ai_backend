@@ -5,7 +5,14 @@ def build_output(
     processed_text=None,
     questions=None,
     mcqs=None,
-    sources=None
+    sources=None,
+    vocab_story=None,
+    vocab_mcqs=None,
+    flashcards=None,
+    mindmap=None,
+    summary_table=None,
+    cloze_tests=None,
+    match_pairs=None,
 ):
     """
     Chuẩn hóa cấu trúc trả về cho API.
@@ -31,5 +38,19 @@ def build_output(
 
     if sources is not None:
         result['sources'] = sources
+    if vocab_story is not None:
+        result['vocab_story'] = vocab_story
+    if vocab_mcqs is not None:
+        result['vocab_mcqs'] = vocab_mcqs
+    if flashcards is not None:
+        result['flashcards'] = flashcards
+    if mindmap is not None:
+        result['mindmap'] = mindmap
+    if summary_table is not None:
+        result['summary_table'] = summary_table
+    if cloze_tests is not None:
+        result['cloze_tests'] = cloze_tests
+    if match_pairs is not None:
+        result['match_pairs'] = match_pairs
 
     return result

@@ -69,6 +69,16 @@ class DatabaseService:
             ).first()
         except:
             return None
+
+    @staticmethod
+    def get_note_by_note_id(db: Session, note_id: str) -> Optional[Note]:
+        """
+        Tìm note chỉ theo note_id (dùng khi note_id có unique constraint toàn bảng)
+        """
+        try:
+            return db.query(Note).filter(Note.note_id == note_id).first()
+        except:
+            return None
     
     @staticmethod
     def get_or_create_note(
@@ -98,7 +108,7 @@ class DatabaseService:
             Note object (existing hoặc newly created)
         """
         existing_note = DatabaseService.get_note_by_user_and_note_id(db, user_id, note_id)
-        
+
         if existing_note:
             if file_type is not None:
                 existing_note.file_type = file_type
@@ -119,24 +129,24 @@ class DatabaseService:
             db.commit()
             db.refresh(existing_note)
             return existing_note
-        else:
-            note = Note(
-                id=uuid.uuid4(),
-                user_id=uuid.UUID(user_id),
-                note_id=note_id,
-                file_type=file_type,
-                filename=filename,
-                file_size=file_size,
-                raw_text=None,
-                processed_text=None,
-                summary=None,
-                review=None,
-                job_id=job_id
-            )
-            db.add(note)
-            db.commit()
-            db.refresh(note)
-            return note
+
+        note = Note(
+            id=uuid.uuid4(),
+            user_id=uuid.UUID(user_id),
+            note_id=note_id,
+            file_type=file_type,
+            filename=filename,
+            file_size=file_size,
+            raw_text=None,
+            processed_text=None,
+            summary=None,
+            review=None,
+            job_id=job_id
+        )
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+        return note
     
     @staticmethod
     def create_note(
@@ -298,7 +308,6 @@ class DatabaseService:
         if processed_at is not None:
             note.processed_at = processed_at
         elif processed_text is not None or summary is not None:
-            # Auto set processed_at nếu đang update kết quả xử lý
             note.processed_at = datetime.utcnow()
         
         db.commit()
@@ -430,7 +439,5 @@ class DatabaseService:
         db.commit()
         return True
 
-
-# Global instance
 db_service = DatabaseService()
 

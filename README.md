@@ -71,7 +71,7 @@ ffmpeg -version
 
 ### 4. Cài đặt Redis
 
-Redis được sử dụng làm message broker và result backend cho Celery.
+Redis được sử dụng làm message broker và result backend cho Celery.i
 
 #### Cách 1: Sử dụng Docker (Khuyến nghị)
 ```bash
@@ -194,10 +194,34 @@ uvicorn app.main:app --reload
 
 Tất cả services (Backend, Celery, Redis, PostgreSQL) sẽ được khởi động tự động:
 
+### Cách 2: Chạy với Docker Compose (Production-like)
+
+Tất cả services (Backend, Celery, Redis, PostgreSQL) sẽ được khởi động tự động:
+
 ```bash
 docker-compose up --build
 ```
 
+**Lưu ý**: 
+- Đảm bảo file `.env` đã được tạo và cấu hình đúng
+- Lần đầu chạy có thể mất vài phút để build images
+
+Để chạy ở background:
+```bash
+docker-compose up -d
+```
+
+Xem logs:
+```bash
+docker-compose logs -f
+```
+
+Dừng services:
+```bash
+docker-compose down
+```
+
+## 📁 Project Layout
 **Lưu ý**: 
 - Đảm bảo file `.env` đã được tạo và cấu hình đúng
 - Lần đầu chạy có thể mất vài phút để build images
@@ -224,7 +248,11 @@ docker-compose down
   - `services/` - Celery tasks, database service, storage service
   - `database/` - Database models, migrations, initialization
 - `tests/` - Unit tests và integration tests
+  - `services/` - Celery tasks, database service, storage service
+  - `database/` - Database models, migrations, initialization
+- `tests/` - Unit tests và integration tests
 
+## 🔌 API Endpoints
 ## 🔌 API Endpoints
 
 ### POST `/api/v1/process`
@@ -266,7 +294,9 @@ Check status và progress của job
 Lấy kết quả khi job completed
 
 > 📖 Xem chi tiết: [TESTING_GUIDE.md](TESTING_GUIDE.md)
+> 📖 Xem chi tiết: [TESTING_GUIDE.md](TESTING_GUIDE.md)
 
+## 🛠️ Tech Stack
 ## 🛠️ Tech Stack
 - **FastAPI** - Web framework
 - **LangChain** - LLM orchestration
@@ -279,8 +309,10 @@ Lấy kết quả khi job completed
 - **Celery** - Background task queue
 - **Redis** - Message broker & result backend
 - **PostgreSQL** - Database
+- **PostgreSQL** - Database
 - **Docker Compose** - Container orchestration
 
+## ✨ Features
 ## ✨ Features
 - ✅ **Multi-input Support**: Text, Image, Audio, PDF, DOCX
 - ✅ **Background Processing**: Really async với Celery + Redis
@@ -290,9 +322,11 @@ Lấy kết quả khi job completed
 - ✅ **Learning Assets**: Tự động sinh 3 kiểu tóm tắt + 5-10 câu hỏi ôn tập + MCQ 3 độ khó
 
 ## 🗄️ Database Migrations
+## 🗄️ Database Migrations
 - Với database mới: `python -m app.database.init_db`
 - Với database cũ cần bổ sung cột `summaries/questions/mcqs`: `python -m app.database.migrations`
 
+## 🧪 Testing
 ## 🧪 Testing
 
 ### Quick Test Script
@@ -305,6 +339,9 @@ python quick_test.py
 1. ✅ Redis đang chạy
 2. ✅ Celery worker đang chạy
 3. ✅ FastAPI server đang chạy
+1. ✅ Redis đang chạy
+2. ✅ Celery worker đang chạy
+3. ✅ FastAPI server đang chạy
 
 ### Manual Testing
 Xem hướng dẫn chi tiết: [TESTING_GUIDE.md](TESTING_GUIDE.md)
@@ -313,6 +350,12 @@ Xem hướng dẫn chi tiết: [TESTING_GUIDE.md](TESTING_GUIDE.md)
 ```bash
 pytest tests/test_summarizer.py
 ```
+
+## 📚 Tài liệu tham khảo
+- [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [CrewAI Documentation](https://docs.crewai.com/)
+- [LangChain Documentation](https://python.langchain.com/)
+- [Celery Documentation](https://docs.celeryq.dev/)
 
 ## 📚 Tài liệu tham khảo
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)

@@ -3,6 +3,7 @@ Prompt Retriever - RAG để cải thiện prompts dựa trên feedback
 Sử dụng feedback từ users để cải thiện chất lượng tóm tắt
 """
 from typing import Dict, Any, List, Optional
+from sqlalchemy.exc import OperationalError, InterfaceError
 from sqlalchemy.orm import Session
 from app.services.feedback_service import feedback_service
 
@@ -30,7 +31,14 @@ class PromptRetriever:
         Returns:
             Improved prompt với insights từ feedback
         """
-        insights = feedback_service.get_improvement_insights(db, limit=5)
+        try:
+            insights = feedback_service.get_improvement_insights(db, limit=5)
+        except (OperationalError, InterfaceError) as e:
+            print(f"[prompt_retriever] Skip RAG prompt due to DB error: {e}")
+            insights = {}
+        except Exception as e:
+            print(f"[prompt_retriever] Skip RAG prompt due to unexpected error: {e}")
+            insights = {}
         
         improved_prompt = base_prompt
         

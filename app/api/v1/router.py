@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Optional, List
 import uuid
 import os
+import hashlib
 from datetime import datetime
 
 from app.agents.orchestrator import process_text, process_file, process_combined_inputs
@@ -37,8 +38,6 @@ def get_user_uuid(db: Session, user_id: str) -> uuid.UUID:
             raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
         return user.id
 
-# ============= Synchronous Endpoints (Quick processing) =============
-
 @router.post("/summarize")
 async def summarize_text_sync(
     note: str = Form(...),
@@ -59,10 +58,8 @@ async def summarize_text_sync(
     
     if user_id and note_id:
         try:
-            # Get or create user
             user = db_service.get_or_create_user(db, username=user_id)
             
-            # Create or update note (upsert)
             db_service.create_note(
                 db=db,
                 user_id=str(user.id),
@@ -77,7 +74,6 @@ async def summarize_text_sync(
                 review=result.get('review')
             )
         except Exception as e:
-            # Log error nhưng không fail request
             print(f"Error saving to database: {e}")
     
     return result
@@ -88,6 +84,8 @@ async def process_input_sync(
     text: str = Form(None),
     user_id: Optional[str] = Form(None),
     note_id: Optional[str] = Form(None),
+    content_type: Optional[str] = Form(None),
+    checked_vocab_items: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -100,38 +98,104 @@ async def process_input_sync(
     - note_id: Custom note ID từ app
     """
     if file:
-        result = await process_file(file, db=db, use_rag=True)
+        file_content = await file.read()
+        await file.seek(0) 
+        file_size = len(file_content)
+        file_hash = hashlib.sha256(file_content).hexdigest()[:16] 
         
-        # Lưu vào database nếu có user_id và note_id
         if user_id and note_id:
             try:
-                # Get or create user
+                user = db_service.get_or_create_user(db, username=user_id)
+                existing_note = db_service.get_note_by_user_and_note_id(db, str(user.id), note_id)
+                
+                if existing_note:
+                    current_content_hash = hashlib.sha256(
+                        f"FILE:{file.filename}:{file_hash}".encode('utf-8')
+                    ).hexdigest()
+                    
+                    saved_review = existing_note.review or {}
+                    saved_content_hash = saved_review.get('content_hash') if isinstance(saved_review, dict) else None
+                    
+                    if not saved_content_hash:
+                        saved_content = existing_note.raw_text or ""
+                        saved_content_hash = hashlib.sha256(
+                            saved_content.encode('utf-8')
+                        ).hexdigest()
+                    
+                    if current_content_hash == saved_content_hash and existing_note.processed_text:
+                        print(f"[cache] Note {note_id} found in DB, file unchanged, returning cached result")
+                        result = {
+                            'summary': existing_note.summary,
+                            'summaries': existing_note.summaries,
+                            'review': existing_note.review or {},
+                            'questions': existing_note.questions or [],
+                            'mcqs': existing_note.mcqs or {},
+                            'raw_text': existing_note.raw_text,
+                            'processed_text': existing_note.processed_text,
+                        }
+                        
+                        if existing_note.review:
+                            review_data = existing_note.review
+                            if isinstance(review_data, dict):
+                                result['vocab_story'] = review_data.get('vocab_story')
+                                result['vocab_mcqs'] = review_data.get('vocab_mcqs')
+                                result['flashcards'] = review_data.get('flashcards')
+                                result['mindmap'] = review_data.get('mindmap')
+                                result['summary_table'] = review_data.get('summary_table')
+                                result['cloze_tests'] = review_data.get('cloze_tests')
+                                result['match_pairs'] = review_data.get('match_pairs')
+                                if 'sources' in review_data:
+                                    result['sources'] = review_data['sources']
+                        
+                        return result
+                    else:
+                        print(f"[cache] Note {note_id} found but file changed, running AI again")
+            except Exception as e:
+                print(f"Error checking cache: {e}")
+        
+        result = await process_file(
+            file,
+            db=db,
+            use_rag=True,
+            content_type=content_type,
+            checked_vocab_items=checked_vocab_items,
+        )
+        
+        if user_id and note_id:
+            try:
                 user = db_service.get_or_create_user(db, username=user_id)
                 
-                # Get file size
-                file_size = None
-                if hasattr(file, 'size'):
-                    file_size = file.size
-                else:
-                    # Read file to get size
-                    contents = await file.read()
-                    file_size = len(contents)
-                    await file.seek(0)  # Reset file pointer
-                
-                # Detect file type
                 from app.core.detector import detect_input_type
                 import tempfile
                 import os
                 suffix = os.path.splitext(file.filename)[1]
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                contents = await file.read()
-                tmp.write(contents)
+                tmp.write(file_content)
                 tmp.close()
                 file_type = detect_input_type(tmp.name)
                 os.remove(tmp.name)
-                await file.seek(0)  # Reset file pointer
                 
-                # Create note
+                review_payload = result.get('review') or {}
+                if result.get('sources'):
+                    review_payload = {
+                        **review_payload,
+                        'sources': result.get('sources')
+                    }
+                
+                if content_type == 'checklist':
+                    review_payload['vocab_story'] = result.get('vocab_story')
+                    review_payload['vocab_mcqs'] = result.get('vocab_mcqs')
+                    review_payload['flashcards'] = result.get('flashcards')
+                    review_payload['mindmap'] = result.get('mindmap')
+                    review_payload['summary_table'] = result.get('summary_table')
+                    review_payload['cloze_tests'] = result.get('cloze_tests')
+                    review_payload['match_pairs'] = result.get('match_pairs')
+                
+                content_hash = hashlib.sha256(
+                    f"FILE:{file.filename}:{file_hash}".encode('utf-8')
+                ).hexdigest()
+                review_payload['content_hash'] = content_hash
+                
                 db_service.create_note(
                     db=db,
                     user_id=str(user.id),
@@ -145,20 +209,98 @@ async def process_input_sync(
                     summaries=result.get('summaries'),
                     questions=result.get('questions'),
                     mcqs=result.get('mcqs'),
-                    review=result.get('review')
+                    review=review_payload
                 )
             except Exception as e:
                 print(f"Error saving to database: {e}")
                 
     elif text:
-        result = await process_text(text, db=db, use_rag=True)
+        if user_id and note_id:
+            try:
+                user = db_service.get_or_create_user(db, username=user_id)
+                existing_note = db_service.get_note_by_user_and_note_id(db, str(user.id), note_id)
+                
+                if existing_note:
+                    hash_prefix = "vocab::" if content_type == "checklist" else "text::"
+                    current_content_hash = hashlib.sha256(
+                        f"{hash_prefix}{text.strip()}".encode('utf-8')
+                    ).hexdigest()
+                    
+                    saved_review = existing_note.review or {}
+                    saved_content_hash = saved_review.get('content_hash') if isinstance(saved_review, dict) else None
+                    
+                    if not saved_content_hash:
+                        saved_content = existing_note.raw_text or ""
+                        saved_hash_prefix = "vocab::" if (content_type == "checklist" or existing_note.file_type == "checklist") else "text::"
+                        saved_content_hash = hashlib.sha256(
+                            f"{saved_hash_prefix}{saved_content}".encode('utf-8')
+                        ).hexdigest()
+                    
+                    if current_content_hash == saved_content_hash and existing_note.processed_text:
+                        print(f"[cache] Note {note_id} found in DB, content unchanged, returning cached result")
+                        result = {
+                            'summary': existing_note.summary,
+                            'summaries': existing_note.summaries,
+                            'review': existing_note.review or {},
+                            'questions': existing_note.questions or [],
+                            'mcqs': existing_note.mcqs or {},
+                            'raw_text': existing_note.raw_text,
+                            'processed_text': existing_note.processed_text,
+                        }
+                        
+                        if existing_note.review:
+                            review_data = existing_note.review
+                            if isinstance(review_data, dict):
+                                result['vocab_story'] = review_data.get('vocab_story')
+                                result['vocab_mcqs'] = review_data.get('vocab_mcqs')
+                                result['flashcards'] = review_data.get('flashcards')
+                                result['mindmap'] = review_data.get('mindmap')
+                                result['summary_table'] = review_data.get('summary_table')
+                                result['cloze_tests'] = review_data.get('cloze_tests')
+                                result['match_pairs'] = review_data.get('match_pairs')
+                                if 'sources' in review_data:
+                                    result['sources'] = review_data['sources']
+                        
+                        return result
+                    else:
+                        print(f"[cache] Note {note_id} found but content changed, running AI again")
+            except Exception as e:
+                print(f"Error checking cache: {e}")
+        
+        result = await process_text(
+            text,
+            db=db,
+            use_rag=True,
+            content_type=content_type,
+            checked_vocab_items=checked_vocab_items,
+        )
         
         if user_id and note_id:
             try:
-                # Get or create user
                 user = db_service.get_or_create_user(db, username=user_id)
                 
-                # Create note
+                review_payload = result.get('review') or {}
+                if result.get('sources'):
+                    review_payload = {
+                        **review_payload,
+                        'sources': result.get('sources')
+                    }
+                
+                if content_type == 'checklist':
+                    review_payload['vocab_story'] = result.get('vocab_story')
+                    review_payload['vocab_mcqs'] = result.get('vocab_mcqs')
+                    review_payload['flashcards'] = result.get('flashcards')
+                    review_payload['mindmap'] = result.get('mindmap')
+                    review_payload['summary_table'] = result.get('summary_table')
+                    review_payload['cloze_tests'] = result.get('cloze_tests')
+                    review_payload['match_pairs'] = result.get('match_pairs')
+                
+                hash_prefix = "vocab::" if content_type == "checklist" else "text::"
+                content_hash = hashlib.sha256(
+                    f"{hash_prefix}{text.strip()}".encode('utf-8')
+                ).hexdigest()
+                review_payload['content_hash'] = content_hash
+                
                 db_service.create_note(
                     db=db,
                     user_id=str(user.id),
@@ -170,7 +312,7 @@ async def process_input_sync(
                     summaries=result.get('summaries'),
                     questions=result.get('questions'),
                     mcqs=result.get('mcqs'),
-                    review=result.get('review')
+                    review=review_payload
                 )
             except Exception as e:
                 print(f"Error saving to database: {e}")
@@ -182,27 +324,147 @@ async def process_input_sync(
 
 @router.post("/process/combined")
 async def process_combined_endpoint(
-    text_note: Optional[str] = Form(None),
-    files: List[UploadFile] = File(None),
-    user_id: Optional[str] = Form(None),
-    note_id: Optional[str] = Form(None),
+    text_note: Optional[str] = Form(default=None),
+    files: Optional[List[UploadFile]] = File(default=None),
+    user_id: Optional[str] = Form(default=None),
+    note_id: Optional[str] = Form(default=None),
+    content_type: Optional[str] = Form(default=None),
+    checked_vocab_items: Optional[str] = Form(default=None),
     db: Session = Depends(get_db)
 ):
     """
     Endpoint mới cho phép gửi đồng thời nhiều input (text + nhiều file) trong một request
     để tạo ra ghi chú hoàn chỉnh.
+    
+    Logic cache:
+    - Nếu note đã tồn tại và nội dung không thay đổi → trả về kết quả đã lưu (không chạy lại AI)
+    - Nếu note chưa tồn tại hoặc nội dung đã thay đổi → chạy AI và lưu kết quả mới
     """
-    uploads = files or []
+    uploads = files if files is not None else []
     has_text = text_note and text_note.strip()
 
     if not has_text and not uploads:
         raise HTTPException(status_code=400, detail="Cần cung cấp ít nhất text_note hoặc files")
 
+    if user_id and note_id:
+        try:
+            user = db_service.get_or_create_user(db, username=user_id)
+            existing_note = db_service.get_note_by_user_and_note_id(db, str(user.id), note_id)
+            
+            if existing_note:
+                content_parts = []
+                if text_note:
+                    content_parts.append(f"TEXT:{text_note.strip()}")
+                if uploads:
+                    file_metadata = []
+                    for f in uploads:
+                        filename = f.filename or "unknown"
+                        try:
+                            file_content = await f.read(1024)
+                            await f.seek(0) 
+                            file_hash = hashlib.sha256(file_content).hexdigest()[:16] 
+                        except:
+                            file_hash = "0"
+                        file_metadata.append(f"{filename}:{file_hash}")
+                    content_parts.append(f"FILES:{'|'.join(file_metadata)}")
+                
+                current_content_hash = hashlib.sha256(
+                    "|".join(content_parts).encode('utf-8')
+                ).hexdigest()
+                
+                saved_review = existing_note.review or {}
+                saved_content_hash = saved_review.get('content_hash') if isinstance(saved_review, dict) else None
+                
+                if not saved_content_hash:
+                    saved_content = existing_note.raw_text or ""
+                    saved_content_hash = hashlib.sha256(
+                        saved_content.encode('utf-8')
+                    ).hexdigest()
+                
+                if current_content_hash == saved_content_hash and existing_note.processed_text:
+                    print(f"[cache] Note {note_id} found in DB, content unchanged, returning cached result")
+                    result = {
+                        'summary': existing_note.summary,
+                        'summaries': existing_note.summaries,
+                        'review': existing_note.review or {},
+                        'questions': existing_note.questions or [],
+                        'mcqs': existing_note.mcqs or {},
+                        'raw_text': existing_note.raw_text,
+                        'processed_text': existing_note.processed_text,
+                    }
+                    
+                    if existing_note.review:
+                        review_data = existing_note.review
+                        if isinstance(review_data, dict):
+                            vocab_story = review_data.get('vocab_story')
+                            cloze_tests = review_data.get('cloze_tests')
+                            match_pairs = review_data.get('match_pairs')
+
+                            if vocab_story:
+                                story_paras = vocab_story.get('paragraphs', [])
+                                if not isinstance(story_paras, list) or len(story_paras) < 5:
+                                    print(f"[cache] Cached vocab_story invalid ({len(story_paras) if isinstance(story_paras, list) else 0} paragraphs), will regenerate")
+                                    vocab_story = None
+                            
+                            if cloze_tests:
+                                valid_cloze = []
+                                for item in cloze_tests:
+                                    if isinstance(item, dict):
+                                        blanks = item.get('blanks', [])
+                                        if isinstance(blanks, list) and len(blanks) == 1:
+                                            valid_cloze.append(item)
+                                if valid_cloze:
+                                    cloze_tests = valid_cloze
+                                else:
+                                    print(f"[cache] Cached cloze_tests invalid, will regenerate")
+                                    cloze_tests = None
+                            
+                            if match_pairs:
+                                valid_pairs = []
+                                for item in match_pairs:
+                                    if isinstance(item, dict):
+                                        meaning = item.get('meaning', '')
+                                        meaning_lower = str(meaning).lower()
+                                        placeholder_patterns = [
+                                            "nghĩa của", "nghĩa ngắn gọn", "ý nghĩa ngắn gọn", 
+                                            "thực tế của", "meaning of", "nghĩa của từ"
+                                        ]
+                                        if not any(pattern in meaning_lower for pattern in placeholder_patterns) and meaning.strip():
+                                            valid_pairs.append(item)
+                                if valid_pairs:
+                                    match_pairs = valid_pairs
+                                else:
+                                    print(f"[cache] Cached match_pairs invalid, will regenerate")
+                                    match_pairs = None
+                            
+                            if not vocab_story or not cloze_tests or not match_pairs:
+                                print(f"[cache] Some cached results invalid, will regenerate")
+                            else:
+                                result['vocab_story'] = vocab_story
+                                result['vocab_mcqs'] = review_data.get('vocab_mcqs')
+                                result['flashcards'] = review_data.get('flashcards')
+                                result['mindmap'] = review_data.get('mindmap')
+                                result['summary_table'] = review_data.get('summary_table')
+                                result['cloze_tests'] = cloze_tests
+                                result['match_pairs'] = match_pairs
+                                if 'sources' in review_data:
+                                    result['sources'] = review_data['sources']
+                                
+                                return result
+                    
+                    print(f"[cache] Note {note_id} found but validation failed or missing data, running AI again")
+                else:
+                    print(f"[cache] Note {note_id} found but content changed, running AI again")
+        except Exception as e:
+            print(f"Error checking cache: {e}")
+
     result = await process_combined_inputs(
         text_note=text_note,
         files=uploads,
         db=db,
-        use_rag=True
+        use_rag=True,
+        content_type=content_type,
+        checked_vocab_items=checked_vocab_items
     )
 
     if user_id and note_id:
@@ -214,6 +476,33 @@ async def process_combined_endpoint(
                     **review_payload,
                     'sources': result.get('sources')
                 }
+            
+            if content_type == 'checklist':
+                review_payload['vocab_story'] = result.get('vocab_story')
+                review_payload['vocab_mcqs'] = result.get('vocab_mcqs')
+                review_payload['flashcards'] = result.get('flashcards')
+                review_payload['mindmap'] = result.get('mindmap')
+                review_payload['summary_table'] = result.get('summary_table')
+                review_payload['cloze_tests'] = result.get('cloze_tests')
+                review_payload['match_pairs'] = result.get('match_pairs')
+            
+            content_parts = []
+            if text_note:
+                content_parts.append(f"TEXT:{text_note.strip()}")
+            if uploads:
+                file_metadata = []
+                for f in uploads:
+                    filename = f.filename or "unknown"
+                    try:
+                        file_content = await f.read(1024)
+                        await f.seek(0) 
+                        file_hash = hashlib.sha256(file_content).hexdigest()[:16]
+                    except:
+                        file_hash = "0"
+                    file_metadata.append(f"{filename}:{file_hash}")
+                content_parts.append(f"FILES:{'|'.join(file_metadata)}")
+            content_hash = hashlib.sha256("|".join(content_parts).encode('utf-8')).hexdigest()
+            review_payload['content_hash'] = content_hash
 
             db_service.create_note(
                 db=db,
@@ -230,12 +519,11 @@ async def process_combined_endpoint(
                 mcqs=result.get('mcqs'),
                 review=review_payload
             )
+            print(f"[cache] Saved result for note {note_id} to DB")
         except Exception as e:
             print(f"Error saving combined note: {e}")
 
     return result
-
-# ============= Asynchronous Endpoints (Background processing) =============
 
 @router.post("/process/async")
 async def process_input_async(
@@ -291,7 +579,6 @@ async def get_job_result(job_id: str):
     result = job_service.get_job_result(job_id)
     
     if result is None:
-        # Check status để xem job có tồn tại không
         status = job_service.get_job_status(job_id)
         if status.get('status') == 'pending' or status.get('status') == 'processing':
             raise HTTPException(
@@ -312,8 +599,6 @@ async def get_job_result(job_id: str):
     return result
 
 
-# ============= Database Endpoints (History & Search) =============
-
 @router.get("/users/{user_id}/notes")
 async def get_user_notes(
     user_id: str,
@@ -333,7 +618,6 @@ async def get_user_notes(
     """
     from app.database.models import Note
     
-    # Get user UUID (support both UUID and username)
     user_uuid = get_user_uuid(db, user_id)
     
     notes = db_service.get_user_notes(
@@ -344,7 +628,6 @@ async def get_user_notes(
         file_type=file_type
     )
     
-    # Count total
     total_query = db.query(Note).filter(Note.user_id == user_uuid)
     if file_type:
         total_query = total_query.filter(Note.file_type == file_type)
@@ -356,6 +639,55 @@ async def get_user_notes(
         "limit": limit,
         "offset": offset
     }
+
+
+@router.get("/notes/{note_id}")
+async def get_note_by_id(
+    note_id: str,
+    user_id: Optional[str] = Query(None, description="User ID để ưu tiên tìm note theo user"),
+    db: Session = Depends(get_db)
+):
+    """
+    Lấy note theo note_id. Nếu truyền user_id, sẽ ưu tiên tìm theo (user_id, note_id),
+    nếu không có sẽ fallback tìm theo note_id duy nhất.
+    """
+    note = None
+    try:
+        if user_id:
+            user_uuid = get_user_uuid(db, user_id)
+            note = db_service.get_note_by_user_and_note_id(db, str(user_uuid), note_id)
+    except Exception as e:
+        print(f"Error finding note by user_id: {e}")
+
+    if not note:
+        note = db_service.get_note_by_note_id(db, note_id)
+
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    result = {
+        'summary': note.summary,
+        'summaries': note.summaries,
+        'review': note.review or {},
+        'questions': note.questions or [],
+        'mcqs': note.mcqs or {},
+        'raw_text': note.raw_text,
+        'processed_text': note.processed_text,
+    }
+
+    review_data = note.review
+    if isinstance(review_data, dict):
+        result['vocab_story'] = review_data.get('vocab_story')
+        result['vocab_mcqs'] = review_data.get('vocab_mcqs')
+        result['flashcards'] = review_data.get('flashcards')
+        result['mindmap'] = review_data.get('mindmap')
+        result['summary_table'] = review_data.get('summary_table')
+        result['cloze_tests'] = review_data.get('cloze_tests')
+        result['match_pairs'] = review_data.get('match_pairs')
+        if 'sources' in review_data:
+            result['sources'] = review_data['sources']
+
+    return result
 
 
 @router.get("/users/{user_id}/notes/search")
@@ -392,30 +724,6 @@ async def search_user_notes(
     }
 
 
-@router.get("/notes/{note_id}")
-async def get_note(
-    note_id: str,
-    user_id: Optional[str] = Query(None, description="User ID để lấy note (optional, nếu có thì tìm theo user_id + note_id)"),
-    db: Session = Depends(get_db)
-):
-    """
-    Lấy chi tiết một note theo ID
-    
-    Query params:
-    - user_id: User ID (optional, nếu có thì tìm theo user_id + note_id để chính xác hơn)
-    }
-    """
-    if user_id:
-        note = db_service.get_note_by_user_and_note_id(db, user_id, note_id)
-    else:
-        note = db_service.get_note_by_id(db, note_id)
-    
-    if not note:
-        raise HTTPException(status_code=404, detail="Note không tồn tại")
-    
-    return note.to_dict()
-
-
 @router.delete("/notes/{note_id}")
 async def delete_note(
     note_id: str,
@@ -434,8 +742,6 @@ async def delete_note(
         "message": "Note đã được xóa"
     }
 
-
-# ============= Feedback Endpoints =============
 
 @router.post("/notes/{note_id}/feedback")
 async def submit_feedback(
@@ -462,7 +768,6 @@ async def submit_feedback(
     """
     import json
     
-    # Parse JSON arrays nếu có
     liked = None
     disliked = None
     if liked_aspects:
@@ -616,8 +921,6 @@ async def sync_note_result(
     }
 
 
-# ============= Debug Endpoints =============
-
 @router.post("/debug/test-ocr")
 async def debug_test_ocr(
     file: UploadFile = File(...)
@@ -635,7 +938,6 @@ async def debug_test_ocr(
     import pytesseract
     from PIL import Image
     
-    # Save file to temp location
     suffix = os.path.splitext(file.filename)[1]
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     contents = await file.read()
@@ -673,7 +975,6 @@ async def debug_test_ocr(
                 "tesseract_configured_path": configured_path
             }
         
-        # Test OCR
         text, error_message = process_image_file(file_path)
         
         result = {
@@ -692,7 +993,6 @@ async def debug_test_ocr(
         return result
         
     finally:
-        # Cleanup
         try:
             os.remove(file_path)
         except:
@@ -717,7 +1017,6 @@ async def debug_celery_status():
         "errors": []
     }
     
-    # Test Redis connection
     try:
         redis_client = redis.from_url(result["redis_url"])
         redis_client.ping()
@@ -726,15 +1025,12 @@ async def debug_celery_status():
         result["errors"].append(f"Redis connection error: {e}")
         return result
     
-    # Inspect workers
     try:
         inspect = celery_app.control.inspect()
         
-        # Get active workers
         active_workers = inspect.active()
         if active_workers:
             result["celery_workers"] = list(active_workers.keys())
-            # Get active tasks
             for worker_name, tasks in active_workers.items():
                 for task in tasks:
                     result["active_tasks"].append({
@@ -746,19 +1042,15 @@ async def debug_celery_status():
         else:
             result["errors"].append("No active Celery workers found!")
         
-        # Get registered workers
         registered = inspect.registered()
         if registered:
             result["registered_workers"] = list(registered.keys())
         
-        # Get stats
         stats = inspect.stats()
         if stats:
             result["worker_stats"] = stats
         
-        # Count pending tasks (approximate)
         try:
-            # Get queue length from Redis
             queue_key = celery_app.conf.task_default_queue or 'celery'
             pending_count = redis_client.llen(queue_key)
             result["pending_tasks"] = pending_count

@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 from crewai import Agent, Crew, Task
 
-from app.agents.llm_config import get_gemini_llm
+from app.agents.llm_config import get_processing_llm
 
 reviewer_agent = Agent(
     role='Text Reviewer',
@@ -19,7 +19,7 @@ reviewer_agent = Agent(
         'Nhiệm vụ của bạn là review text đã được chuẩn hóa và đưa ra đánh giá.'
     ),
     verbose=False,
-    llm=get_gemini_llm(),
+    llm=get_processing_llm(),
     allow_delegation=False
 )
 
