@@ -1,6 +1,3 @@
-"""
-Database Models - User, Note, Feedback
-"""
 from datetime import datetime
 import uuid
 
@@ -23,7 +20,6 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Relationship với notes và feedbacks
     notes = relationship("Note", back_populates="user", cascade="all, delete-orphan")
     feedbacks = relationship("Feedback", back_populates="user", cascade="all, delete-orphan")
     
@@ -37,7 +33,6 @@ class Note(Base):
     """
     __tablename__ = 'notes'
     __table_args__ = (
-        # Đảm bảo note_id chỉ unique trong phạm vi từng user
         UniqueConstraint('user_id', 'note_id', name='uq_notes_user_note_id'),
     )
     
@@ -62,7 +57,7 @@ class Note(Base):
     review = Column(JSON, nullable=True)  
     
     # Job tracking (cho async processing)
-    job_id = Column(String(100), nullable=True, index=True)  # Celery job ID
+    job_id = Column(String(100), nullable=True, index=True)  
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

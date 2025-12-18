@@ -1,7 +1,3 @@
-"""
-Database Initialization Script
-Chạy script này để tạo tables trong database
-"""
 from app.database.database import init_db, engine
 from app.database.models import User, Note
 

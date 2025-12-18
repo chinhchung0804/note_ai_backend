@@ -1,7 +1,3 @@
-"""
-Text Agent - Xử lý và chuẩn hóa text bằng CrewAI
-Nhiệm vụ: Nhận text từ OCR Agent và chuẩn hóa thành định dạng tốt hơn
-"""
 import asyncio
 from typing import Any
 

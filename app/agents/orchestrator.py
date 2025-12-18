@@ -154,7 +154,6 @@ async def _extract_text_from_upload(upload_file):
             os.remove(file_path)
         except:
             pass
-        # Reset pointer để có thể đọc lại ở nơi khác nếu cần
         await upload_file.seek(0)
 
 
@@ -244,7 +243,6 @@ async def process_combined_inputs(
 
     for upload_file in files:
         extracted = await _extract_text_from_upload(upload_file)
-        # Fallback: nếu processed_text rỗng nhưng raw_text có, dùng raw_text
         proc_text = extracted.get('processed_text') or extracted.get('raw_text') or ''
         source_entry = {
             'type': extracted['input_type'],
@@ -272,24 +270,21 @@ async def process_combined_inputs(
 
     combined_text = "\\n\\n".join(combined_chunks)
 
-    # Log để debug: xác nhận content_type từ frontend
     print(f"[orchestrator] process_combined_inputs: content_type='{content_type}', has_text={bool(text_note)}, has_files={len(files) > 0}, checked_vocab_items_length={len(checked_vocab_items) if checked_vocab_items else 0}")
 
-    # Chỉ gen các chức năng phù hợp với từng loại note
     if content_type == 'checklist':
-        # Checklist: CHỈ gen 6 chức năng vocab (vocab_summary_table, vocab_story, vocab_mcqs, flashcards, mindmap, cloze_tests, match_pairs)
         print(f"[orchestrator] Generating vocab bundle for checklist (6 features)")
         vocab_bundle = await generate_vocab_bundle(
             combined_text,
             checked_vocab_items
         )
         return build_output(
-            summaries=None,  # Không gen summaries cho checklist
+            summaries=None,  
             review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input - checklist'},
             raw_text=combined_text,
             processed_text=combined_text,
-            questions=[],  # Không gen questions cho checklist
-            mcqs={},  # Không gen MCQs cho checklist
+            questions=[],  
+            mcqs={},  
             sources=sources,
             vocab_story=vocab_bundle['vocab_story'],
             vocab_mcqs=vocab_bundle['vocab_mcqs'],
@@ -299,7 +294,6 @@ async def process_combined_inputs(
             match_pairs=vocab_bundle.get('match_pairs'),
         )
     else:
-        # Text note: CHỈ gen 4 chức năng (summaries, questions, mcqs)
         print(f"[orchestrator] Generating learning assets for text note (4 features)")
         learning_assets = await generate_learning_assets(
             raw_text=combined_text,

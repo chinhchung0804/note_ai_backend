@@ -1,18 +1,13 @@
-"""
-Database Configuration - PostgreSQL với SQLAlchemy
-"""
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Database URL from environment variables
 DATABASE_URL = os.getenv(
     'DATABASE_URL',
     'postgresql://user:password@db:5432/note_ai'
 )
 
-# create engine
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  
@@ -20,10 +15,8 @@ engine = create_engine(
     max_overflow=20
 )
 
-# Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class cho models
 Base = declarative_base()
 
 def get_db():

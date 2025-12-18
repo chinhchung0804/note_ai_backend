@@ -1,7 +1,3 @@
-"""
-Reviewer Agent - Review text bằng CrewAI
-Nhiệm vụ: Nhận text từ Text Agent, review và đánh giá chất lượng
-"""
 import asyncio
 import json
 from typing import Any, Dict
@@ -88,7 +84,6 @@ async def review_text(normalized_text: str, original_text: str = None) -> Dict[s
     except json.JSONDecodeError:
         pass
 
-    # fallback
     return {
         'valid': True,
         'quality_score': 'unknown',

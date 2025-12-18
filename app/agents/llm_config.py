@@ -1,16 +1,8 @@
-"""
-Shared LLM configuration for CrewAI + LangChain agents.
-
-Chính sách hiện tại:
-- Toàn bộ dùng OpenAI-compatible (gpt-4o-mini, gpt-4o, openai-gpt-oss-20b, ...).
-- KHÔNG dùng Gemini.
-"""
 import os
 from typing import Optional
 
 from crewai import LLM
 
-# OpenAI cho toàn bộ (PromptTemplate + CrewAI)
 _openai_llm: Optional[LLM] = None
 _processing_llm: Optional[LLM] = None
 _langchain_llm: Optional[object] = None  
@@ -79,19 +71,13 @@ def _build_openai_chat_llm(*, temperature: float = 0.2):
 
     model = os.getenv('OPENAI_MODEL', 'openai-gpt-oss-20b')
     base_url = os.getenv('OPENAI_BASE_URL')
-    
-    # Thêm timeout và max_tokens để tránh hang và response quá dài
-    # Timeout: 60 giây (đủ cho các prompt dài)
-    # Max tokens: 4000 (đủ cho JSON response lớn)
     return ChatOpenAI(
         model=model,
         api_key=api_key,
         base_url=base_url,
         temperature=temperature,
-        timeout=60,  # 60 giây timeout
-        max_tokens=4000,  # Giới hạn response length
-        # Không set response_format để tương thích với nhiều models hơn
-        # Prompt sẽ hướng dẫn LLM trả về JSON
+        timeout=60,  
+        max_tokens=4000,  
     )
 
 

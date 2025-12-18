@@ -11,7 +11,6 @@ from app.api.v1.router import router as api_router
 app = FastAPI(title="Note Summarizer AI Backend", version="1.0.0")
 app.include_router(api_router, prefix="/api/v1")
 
-# Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
     """
@@ -32,9 +31,7 @@ async def shutdown_event():
     Cleanup khi app shutdown
     """
     print("🛑 Shutting down server...")
-    # Đóng database connections nếu cần
     try:
-        # Có thể thêm cleanup logic ở đây nếu cần
         pass
     except Exception as e:
         print(f"⚠️  Warning during shutdown: {e}")

@@ -9,14 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.agents.llm_config import get_openai_chat_llm
 
-# Primary: OpenAI (model set via OPENAI_MODEL, khuyến nghị gpt-4o-mini)
 PRIMARY_LLM = get_openai_chat_llm(temperature=0.2)
-TRANSLATE_LLM = PRIMARY_LLM  # dùng chung model để dịch on-demand
+TRANSLATE_LLM = PRIMARY_LLM  
 
-# Timeout (seconds) cho mọi call tới LLM – tăng để tránh bị cắt sớm khi gen nhiều feature vocab
 LLM_TIMEOUT_SECONDS = 300.0
 
-# Stopwords (English) để loại bỏ từ không hữu ích khi tạo vocab list
 STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "at",
     "by", "from", "up", "about", "into", "over", "after", "under", "above",
@@ -24,7 +21,6 @@ STOPWORDS = {
     "this", "that", "these", "those", "it", "its", "as", "but",
 }
 
-# Luật chung chống bịa/placeholder (prepend vào mọi prompt)
 GLOBAL_VOCAB_RULES = (
     "QUY TẮC TUYỆT ĐỐI (ÁP DỤNG CHO TẤT CẢ OUTPUT):\n"
     "- CHỈ sử dụng đúng các từ có trong vocab_list.\n"
@@ -129,7 +125,6 @@ summary_chain = LLMChain(llm=PRIMARY_LLM, prompt=summary_prompt_template)
 question_chain = LLMChain(llm=PRIMARY_LLM, prompt=question_prompt_template)
 mcq_chain = LLMChain(llm=PRIMARY_LLM, prompt=mcq_prompt_template)
 
-# Vocab checklist prompts
 vocab_summary_table_template = PromptTemplate(
     input_variables=["raw_text", "vocab_list"],
     template_format="jinja2",
@@ -424,11 +419,8 @@ flashcards_chain = LLMChain(llm=PRIMARY_LLM, prompt=flashcards_template)
 cloze_chain = LLMChain(llm=PRIMARY_LLM, prompt=cloze_template)
 match_pairs_chain = LLMChain(llm=PRIMARY_LLM, prompt=match_pairs_template)
 
-# Patterns để extract JSON từ response
-# Improved pattern để match nested JSON structures tốt hơn
 JSON_BLOCK_PATTERN = re.compile(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', re.S | re.M)
 MARKDOWN_JSON_PATTERN = re.compile(r'```(?:json)?\s*(\{.*?\})\s*```', re.S | re.M)
-# Pattern để match JSON array
 JSON_ARRAY_PATTERN = re.compile(r'\[(?:[^\[\]]|(?:\[[^\[\]]*\]))*\]', re.S | re.M)
 SENTENCE_SPLIT_PATTERN = re.compile(r'(?<=[.!?])\s+')
 
@@ -442,16 +434,12 @@ def _extract_json_block(text: str) -> Optional[str]:
     if not text:
         return None
     
-    # Thử extract từ markdown code block trước
     markdown_match = MARKDOWN_JSON_PATTERN.search(text)
     if markdown_match:
         return markdown_match.group(1)
     
-    # Tìm vị trí của ký tự { đầu tiên (bắt đầu JSON object)
     first_brace = text.find('{')
     if first_brace >= 0:
-        # Tìm vị trí của ký tự } cuối cùng tương ứng
-        # Sử dụng stack để tìm } cuối cùng khớp với { đầu tiên
         brace_count = 0
         last_brace = -1
         for i in range(first_brace, len(text)):
@@ -465,19 +453,16 @@ def _extract_json_block(text: str) -> Optional[str]:
         
         if last_brace > first_brace:
             json_candidate = text[first_brace:last_brace + 1]
-            # Thử parse để đảm bảo đây là JSON hợp lệ
             try:
                 json.loads(json_candidate)
                 return json_candidate
             except json.JSONDecodeError:
                 pass
     
-    # Thử extract JSON object bằng pattern (fallback)
     match = JSON_BLOCK_PATTERN.search(text)
     if match:
         return match.group()
     
-    # Thử extract JSON array
     array_match = JSON_ARRAY_PATTERN.search(text)
     if array_match:
         return array_match.group()
@@ -495,30 +480,20 @@ def _fix_invalid_unicode_escapes(text: str) -> str:
     def fix_unicode_escape(match):
         """Fix một \\u escape sequence"""
         seq = match.group(0)
-        # Nếu là \uXXXX với đủ 4 hex digits
         if len(seq) == 6:
             hex_part = seq[2:6]
-            # Kiểm tra xem có phải hex hợp lệ không
             try:
                 int(hex_part, 16)
-                # Thử decode để kiểm tra
                 try:
                     seq.encode('utf-8').decode('unicode_escape')
-                    return seq  # Hợp lệ, giữ nguyên
+                    return seq  
                 except (UnicodeDecodeError, ValueError):
-                    # Invalid unicode, thay bằng space
                     return ' '
             except ValueError:
-                # Không phải hex hợp lệ, thay bằng space
                 return ' '
-        # Nếu không đủ 4 hex digits, thay bằng space
         return ' '
-    
-    # Fix \u sequences (có thể có 0-4 hex digits)
     text = re.sub(r'\\u[0-9a-fA-F]{0,4}', fix_unicode_escape, text)
-    
     return text
-
 
 def _safe_json_loads(payload: str, fallback: Any) -> Any:
     """
@@ -529,50 +504,39 @@ def _safe_json_loads(payload: str, fallback: Any) -> Any:
     if not payload:
         return fallback
     
-    # Thử parse trực tiếp
     try:
         return json.loads(payload.strip())
     except json.JSONDecodeError:
         pass
     
-    # Thử extract JSON block (có thể trong markdown hoặc có text thêm)
     json_block = _extract_json_block(payload)
     if json_block:
-        # Thử parse trực tiếp
         try:
                 return json.loads(json_block)
         except json.JSONDecodeError:
             pass
         
-        # Thử fix invalid escape sequences
         try:
             fixed_block = _fix_invalid_unicode_escapes(json_block)
             return json.loads(fixed_block)
         except json.JSONDecodeError:
             pass
         
-        # Thử decode unicode escapes thủ công
         try:
-            # Thay thế các invalid \u sequences bằng ký tự an toàn
             import re
             def safe_unicode_replace(match):
                 seq = match.group(0)
                 try:
-                    # Thử decode
                     return seq.encode('utf-8').decode('unicode_escape')
                 except:
-                    # Nếu fail, thay bằng space
                     return ' '
             fixed_block = re.sub(r'\\u[0-9a-fA-F]{4}', safe_unicode_replace, json_block)
             return json.loads(fixed_block)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            # Log để debug nhưng không raise
             print(f"[summarizer] Extracted block (first 200 chars): {json_block[:200]}")
     
     return fallback
 
-
-# ===== Translation helper =====
 async def translate_text_via_llm(text: str, target_lang: str = "vi") -> str:
     """
     Dịch nhanh qua OPENAI_MODEL (gpt-4o-mini). Chỉ trả về nội dung dịch, không giải thích.
@@ -705,8 +669,6 @@ async def _run_chain(chain: LLMChain, variables: Dict[str, Any]) -> str:
     
     Gọi LLM trực tiếp thay vì qua chain để tránh LangChain parse JSON response như template.
     """
-    # Validate input variables trước khi gọi chain
-    # Đảm bảo tất cả required variables đều có giá trị hợp lệ
     validated_vars = {}
     for key, value in variables.items():
         if value is None:
@@ -716,38 +678,29 @@ async def _run_chain(chain: LLMChain, variables: Dict[str, Any]) -> str:
         else:
             validated_vars[key] = value
     
-    # Log để debug input variables (chỉ log keys và length để tránh log quá dài)
     var_summary = {k: f"str({len(str(v))})" if isinstance(v, str) else type(v).__name__ for k, v in validated_vars.items()}
     print(f"[summarizer] _run_chain: Input variables: {var_summary}")
     
     loop = asyncio.get_running_loop()
     
-    # Gọi LLM trực tiếp thay vì qua chain để tránh LangChain parse response như template
-    # Format prompt từ template và gọi LLM trực tiếp
     try:
-        # Format prompt từ template với validated_vars
         formatted_prompt = chain.prompt.format(**validated_vars)
         
-        # Gọi LLM trực tiếp (không qua chain) để tránh LangChain parse response
         llm = chain.llm
         result = await asyncio.wait_for(
             loop.run_in_executor(None, lambda: llm.invoke(formatted_prompt)),
             timeout=LLM_TIMEOUT_SECONDS,
         )
         
-        # Extract text từ LLM response
         if hasattr(result, 'content'):
-            # ChatMessage response
             return result.content.strip()
         elif isinstance(result, str):
             return result.strip()
         elif isinstance(result, dict):
-            # Có thể là dict với 'content' hoặc 'text'
             for key in ('content', 'text', 'output', 'result'):
                 val = result.get(key)
                 if isinstance(val, str):
                     return val.strip()
-            # As a last resort, stringify
             try:
                 return json.dumps(result, ensure_ascii=False)
             except Exception:
@@ -759,22 +712,18 @@ async def _run_chain(chain: LLMChain, variables: Dict[str, Any]) -> str:
         print(f"[summarizer] LLM invoke timed out after {LLM_TIMEOUT_SECONDS}s")
         raise Exception(f"LLM request timed out after {int(LLM_TIMEOUT_SECONDS)} seconds")
     except Exception as e:
-        # Nếu gọi LLM trực tiếp fail, thử lại với chain.invoke() như fallback
         error_msg = str(e)
         print(f"[summarizer] Direct LLM call failed, trying chain.invoke() as fallback: {error_msg[:200]}")
         try:
-            # Fallback: sử dụng chain.invoke() và extract text từ result
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: chain.invoke(validated_vars)),
                 timeout=LLM_TIMEOUT_SECONDS,
             )
-            # Extract text từ result dict
             if isinstance(result, dict):
                 for key in ('text', 'output', 'result', 'content'):
                     val = result.get(key)
                     if isinstance(val, str):
                         return val.strip()
-                # As a last resort, stringify
                 try:
                     return json.dumps(result, ensure_ascii=False)
                 except Exception:
@@ -784,8 +733,7 @@ async def _run_chain(chain: LLMChain, variables: Dict[str, Any]) -> str:
             return str(result).strip()
         except Exception as e2:
             print(f"[summarizer] Chain.invoke() fallback also failed: {str(e2)[:200]}")
-            raise e  # Raise original error
-
+            raise e  
 
 async def _run_chain_with_fallback(chain: LLMChain, name: str, variables: Dict[str, Any]) -> str:
     """
@@ -801,7 +749,6 @@ async def _run_chain_with_fallback(chain: LLMChain, name: str, variables: Dict[s
     except Exception as primary_exc:
         error_msg = str(primary_exc)
         
-        # Kiểm tra xem có phải rate limit (429) không
         is_rate_limit = (
             "429" in error_msg or 
             "rate_limit" in error_msg.lower() or 
@@ -809,8 +756,6 @@ async def _run_chain_with_fallback(chain: LLMChain, name: str, variables: Dict[s
             "quota" in error_msg.lower()
         )
         
-        # "Missing some input keys" thường xảy ra khi LLM response không đúng format
-        # hoặc LangChain cố parse response như template
         if "Missing some input keys" in error_msg:
             print(f"[summarizer] Chain '{name}' failed with input keys error: {error_msg[:200]}")
         elif is_rate_limit:
@@ -820,32 +765,8 @@ async def _run_chain_with_fallback(chain: LLMChain, name: str, variables: Dict[s
         else:
             print(f"[summarizer] Chain '{name}' failed: {error_msg[:200]}")
         
-        # No fallback - raise exception directly
-        # To re-enable Gemini fallback, uncomment the code below and comment out the raise
         raise
         
-        # ===== GEMINI FALLBACK (COMMENTED OUT - UNCOMMENT IF NEEDED) =====
-        # fallback_chain = _get_fallback_chain(name)
-        # if not fallback_chain:
-        #     raise
-        #
-        # try:
-        #     return await _run_chain(fallback_chain, variables)
-        # except Exception as fallback_exc:
-        #     fallback_error_msg = str(fallback_exc)
-        #     is_fallback_rate_limit = (
-        #         "429" in fallback_error_msg or 
-        #         "rate_limit" in fallback_error_msg.lower() or 
-        #         "ResourceExhausted" in fallback_error_msg or
-        #         "quota" in fallback_error_msg.lower()
-        #     )
-        #     if is_fallback_rate_limit:
-        #         print(f"[summarizer] Fallback chain '{name}' also failed with rate limit (429)")
-        #     else:
-        #         print(f"[summarizer] Fallback chain '{name}' also failed: {fallback_error_msg[:200]}")
-        #     raise
-
-
 def _build_summary_instructions(
     db: Optional[Session],
     raw_text: str,
@@ -880,7 +801,6 @@ def _build_summary_instructions(
     )
     return instructions
 
-
 async def generate_summary_bundle(
     raw_text: str,
     db: Optional[Session] = None,
@@ -905,7 +825,6 @@ async def generate_summary_bundle(
     
     return _fallback_summary(raw_text)
 
-
 async def generate_question_set(raw_text: str) -> List[Dict[str, str]]:
     try:
         response = await _run_chain_with_fallback(
@@ -919,7 +838,6 @@ async def generate_question_set(raw_text: str) -> List[Dict[str, str]]:
     except Exception as exc:
         print(f"[summarizer] Error generating questions: {exc}")
     return _fallback_questions(raw_text)
-
 
 async def generate_mcq_set(raw_text: str) -> Dict[str, List[Dict[str, Any]]]:
     try:
@@ -942,7 +860,6 @@ async def generate_mcq_set(raw_text: str) -> Dict[str, List[Dict[str, Any]]]:
         print(f"[summarizer] Error generating MCQs: {exc}")
     return _fallback_mcqs(raw_text)
 
-
 async def generate_learning_assets(
     raw_text: str,
     db: Optional[Session] = None,
@@ -962,7 +879,6 @@ async def generate_learning_assets(
         'questions': questions,
         'mcqs': mcqs
     }
-
 
 def normalize_vocab_list(vocab_words: List[str]) -> List[str]:
     """Chuẩn hóa vocab: strip, dedup, sửa lỗi OCR phổ biến."""
@@ -985,16 +901,11 @@ def normalize_vocab_list(vocab_words: List[str]) -> List[str]:
             low = cand.lower()
         if low in seen:
             continue
-        # loại bỏ stopword đơn chữ
         if len(cand.split()) == 1 and _is_stopword(cand):
             continue
         seen.add(low)
         cleaned.append(cand)
     return cleaned[:25]
-
-
-# ===== Vocab checklist helpers =====
-
 
 def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List[str]:
     def filter_phrases(words: List[str]) -> List[str]:
@@ -1008,11 +919,8 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
             phrase = (w or "").strip()
             if not phrase:
                 continue
-            # Loại bỏ stopwords nếu phrase chỉ là một từ (NHƯNG chỉ filter nếu phrase thực sự là stopword đơn giản)
-            # Không filter các từ có ý nghĩa như "whale", "shark" dù có thể ngắn
             if len(phrase.split()) == 1:
                 normalized_phrase = _normalize_word(phrase)
-                # Chỉ filter nếu thực sự là stopword và từ quá ngắn (< 3 ký tự)
                 if normalized_phrase in STOPWORDS or (len(normalized_phrase) < 3 and normalized_phrase in STOPWORDS):
                     continue
             key = phrase.lower()
@@ -1044,7 +952,6 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
 
     vocab_words: List[str] = []
     if checked_vocab_items:
-        # Prefer explicit items from client (one vocab per checklist item)
         try:
             parsed = json.loads(checked_vocab_items)
             if isinstance(parsed, list):
@@ -1052,10 +959,8 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
         except Exception:
             vocab_words = []
 
-        # If not JSON or empty, parse as comma/semicolon/newline separated items
         if not vocab_words:
             candidates = []
-            # Split by newline, semicolon, or comma
             separator_found = False
             for separator in ["\n", ";", ","]:
                 if separator in checked_vocab_items:
@@ -1067,14 +972,12 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
                     break
             
             if not separator_found:
-                # No separator found, treat as single item
                 cand = checked_vocab_items.strip()
                 if cand:
                     candidates.append(cand)
             
             vocab_words = filter_phrases(candidates)
     
-    # Fallback: extract from raw_text if no checked_vocab_items
     if not vocab_words:
         tokens = [w.strip(" ,.;:()[]{}\"'") for w in raw_text.split()]
         vocab_words = filter_words(tokens)
@@ -1082,19 +985,16 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
     if not vocab_words:
         vocab_words = ["vocabulary"]
     
-    # Debug log để kiểm tra
     print(f"[vocab_parse] Parsed vocab_words: {vocab_words}")
     return vocab_words
 
 
 async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
-    # Validate và prepare input variables
     vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
         "raw_text": raw_text or "",
         "vocab_list": vocab_list_str,
     }
-    # Log để debug input variables
     print(f"[summarizer] _generate_vocab_summary_table: raw_text length={len(raw_text)}, vocab_list count={len(vocab_list)}, vocab_list_str length={len(vocab_list_str)}")
     try:
         response = await _run_chain_with_fallback(vocab_summary_table_chain, 'vocab_summary_table', payload)
@@ -1112,7 +1012,6 @@ async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) ->
                     continue
                 collocations = item.get('collocations')
                 if isinstance(collocations, list):
-                    # dedup collocations
                     seen = set()
                     item['collocations'] = [c for c in collocations if not (c in seen or seen.add(c))]
                 valid_items.append(item)
@@ -1124,15 +1023,12 @@ async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) ->
 
 
 async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[Dict[str, Any]]:
-    # Đảm bảo vocab_list không rỗng và có ít nhất một vài từ
     if not vocab_list:
         print(f"[summarizer] Vocab story: vocab_list is empty, cannot generate story")
         return None
     
-    # Log vocab_list để debug
     print(f"[summarizer] Vocab story: vocab_list has {len(vocab_list)} words: {vocab_list[:4]}...")
     
-    # Validate và prepare input variables
     vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
         "raw_text": raw_text or "",
@@ -1483,12 +1379,10 @@ async def _generate_flashcards(raw_text: str, vocab_list: List[str]) -> Optional
 
 
 async def _generate_mindmap(raw_text: str, vocab_list: List[str]) -> Optional[Dict[str, Any]]:
-    # Mindmap đã tắt: luôn trả None để dùng fallback
     return None
 
 
 def _fallback_vocab_bundle(vocab_words: List[str]) -> Dict[str, Any]:
-    # Không tự gen fallback nội dung để tránh sai lệch; trả về trống an toàn.
     return {
         "summary_table": [],
         "vocab_story": None,
@@ -1506,7 +1400,6 @@ async def generate_vocab_bundle(
 ) -> Dict[str, Any]:
     vocab_words = normalize_vocab_list(_parse_vocab_list(raw_text, checked_vocab_items))
 
-    # Generate all vocab features in parallel
     summary_table, story, mcqs, flashcards, cloze, match_pairs = await asyncio.gather(
         _generate_vocab_summary_table(raw_text, vocab_words),
         _generate_vocab_story(raw_text, vocab_words),
@@ -1580,14 +1473,11 @@ async def generate_vocab_bundle(
             if not isinstance(blanks, list) or not blanks:
                 continue
             
-            # Đếm số blanks trong paragraph text
             blank_count_in_text = len(re.findall(r'___\d+___', paragraph))
             
             if blank_count_in_text == 1 and len(blanks) == 1:
-                # Đúng format: 1 blank trong text và 1 blank trong array
                 valid_cloze.append(item)
             elif blank_count_in_text > 1 or len(blanks) > 1:
-                # POST-PROCESS: Tách thành nhiều câu hỏi riêng biệt
                 print(f"[summarizer] Post-processing cloze: splitting {blank_count_in_text} blanks into separate questions")
                 for idx, blank in enumerate(blanks):
                     if not isinstance(blank, dict):
@@ -1595,20 +1485,16 @@ async def generate_vocab_bundle(
                     blank_id = blank.get('id', idx + 1)
                     blank_answer = blank.get('answer', '')
                     
-                    # Tạo paragraph mới chỉ với 1 blank bằng cách thay thế các blanks khác bằng từ gốc
                     new_paragraph = paragraph
-                    # Tìm tất cả các blanks trong paragraph
                     all_blank_matches = re.finditer(r'___(\d+)___', paragraph)
                     for match in all_blank_matches:
                         match_id = int(match.group(1))
                         if match_id != blank_id:
-                            # Thay thế blank này bằng từ gốc từ answer của blank tương ứng
                             other_blank = next((b for b in blanks if b.get('id') == match_id), None)
                             replacement = other_blank.get('answer', '') if other_blank else ''
                             if replacement:
                                 new_paragraph = new_paragraph.replace(f"___{match_id}___", replacement)
                     
-                    # Đảm bảo chỉ còn 1 blank trong paragraph mới
                     remaining_blanks = len(re.findall(r'___\d+___', new_paragraph))
                     if remaining_blanks == 1 and blank_answer:
                         valid_cloze.append({
@@ -1620,7 +1506,6 @@ async def generate_vocab_bundle(
                 print(f"[summarizer] Final validation: cloze item rejected (no blanks found)")
         
         if valid_cloze:
-            # Rebuild paragraphs to safe templates if answer khớp template
             rebuilt = []
             for item in valid_cloze:
                 blanks = item.get("blanks", [])
@@ -1648,7 +1533,6 @@ async def generate_vocab_bundle(
             print(f"[summarizer] Final validation: all cloze_tests rejected, using fallback")
             cloze = None
     
-    # Match Pairs: không được dùng placeholder - POST-PROCESS để thay thế placeholder bằng nghĩa thực tế
     if match_pairs:
         valid_pairs = []
         placeholder_patterns = [
@@ -1657,7 +1541,6 @@ async def generate_vocab_bundle(
             "nghĩa cụ thể của", "nghĩa tiếng việt của", "nghĩa của x"
         ]
         
-        # Tạo mapping từ summary_table để lấy nghĩa tiếng Việt
         translation_map = {}
         if summary_table:
             for row in summary_table:
@@ -1675,7 +1558,6 @@ async def generate_vocab_bundle(
             meaning = item.get('meaning', '')
             meaning_lower = str(meaning).lower()
             
-            # Kiểm tra xem có phải placeholder không
             is_placeholder = any(pattern in meaning_lower for pattern in placeholder_patterns)
             
             word_key = word.lower().strip()
@@ -1684,12 +1566,10 @@ async def generate_vocab_bundle(
             seen_words.add(word_key)
 
             if is_placeholder or not meaning.strip():
-                # Thay thế bằng translation_map nếu có, nếu không bỏ qua
                 if word_key in translation_map:
                     item['meaning'] = translation_map[word_key]
                 else:
                     continue
-            # Rút gọn meaning tối đa 20 ký tự, 1-3 từ
             meaning_clean = item.get('meaning', '').strip()
             if not meaning_clean:
                 continue
@@ -1700,7 +1580,6 @@ async def generate_vocab_bundle(
             item['meaning'] = meaning_short
             valid_pairs.append(item)
         
-        # Bổ sung thêm từ summary_table nếu thiếu nghĩa, nhưng không giới hạn số cặp
         if summary_table:
             for row in summary_table:
                 if not isinstance(row, dict):
@@ -1720,13 +1599,12 @@ async def generate_vocab_bundle(
                 valid_pairs.append({"id": len(valid_pairs) + 1, "word": w, "meaning": meaning_short})
 
         if valid_pairs:
-            match_pairs = valid_pairs  # giữ toàn bộ để luyện nhiều vòng ở frontend
+            match_pairs = valid_pairs  
             print(f"[summarizer] Final validation: match_pairs post-processed to {len(match_pairs)} pairs")
         else:
             print(f"[summarizer] Final validation: all match_pairs rejected, using fallback")
             match_pairs = None
 
-    # Merge kết quả: dùng LLM result nếu có và hợp lệ, nếu không thì dùng fallback
     return {
         "summary_table": summary_table if summary_table else fallback.get("summary_table"),
         "vocab_story": story if story else fallback.get("vocab_story"),

@@ -1,7 +1,3 @@
-"""
-OCR Agent - Xử lý OCR bằng CrewAI
-Nhiệm vụ: Nhận text từ OCR (Tesseract) và cải thiện chất lượng text
-"""
 import asyncio
 from typing import Any
 
