@@ -4,6 +4,7 @@ from typing import Optional, List
 import uuid
 import os
 import hashlib
+import json
 from datetime import datetime
 
 from app.agents.orchestrator import process_text, process_file, process_combined_inputs
@@ -12,8 +13,88 @@ from app.services.db_service import db_service
 from app.services.feedback_service import feedback_service
 from app.database.database import get_db
 from app.database.models import User
+from app.agents.summarizer_agent import translate_text_via_llm
 
 router = APIRouter()
+
+# Bump this when you change the shape/types of AI outputs stored in DB cache.
+# Used to invalidate cached results even if the note content is unchanged.
+AI_RESULT_SCHEMA_VERSION = 4
+
+
+def _stable_checked_vocab_items(checked_vocab_items: Optional[str]) -> str:
+    """
+    Normalize checked_vocab_items to a stable string for hashing/caching.
+    Accepts JSON array string or any raw string fallback.
+    """
+    if not checked_vocab_items:
+        return ""
+    s = checked_vocab_items.strip()
+    if not s:
+        return ""
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            # normalize: strip, dedup case-insensitive, sort
+            dedup = {}
+            for x in parsed:
+                if x is None:
+                    continue
+                item = str(x).strip()
+                if not item:
+                    continue
+                key = item.lower()
+                if key not in dedup:
+                    dedup[key] = item
+            normalized = list(dedup.values())
+            normalized.sort(key=lambda v: v.lower())
+            return json.dumps(normalized, ensure_ascii=False)
+    except Exception:
+        pass
+    return s
+
+
+def _apply_reset_ids_for_cloze_and_match_pairs(result: dict, content_hash: str) -> None:
+    """
+    Ensure Cloze Test and Match Pairs are treated as a 'new set' when note content changes.
+
+    We do this by assigning deterministic numeric ids based on content_hash so that
+    client-side progress keyed by id will reset when content_hash changes.
+    """
+    if not isinstance(result, dict) or not content_hash:
+        return
+    try:
+        # 5 hex digits -> <= 1,048,575; base*1000 fits in 32-bit signed int
+        base = int(content_hash[:5], 16)
+    except Exception:
+        base = 0
+    set_id = base
+
+    cloze_tests = result.get("cloze_tests")
+    if isinstance(cloze_tests, list):
+        for idx, item in enumerate(cloze_tests, start=1):
+            if isinstance(item, dict):
+                item["id"] = set_id * 1000 + idx
+                item["set_id"] = set_id
+
+    match_pairs = result.get("match_pairs")
+    if isinstance(match_pairs, list):
+        # Offset to avoid id collisions with cloze_tests within the same set_id
+        offset = 500
+        for idx, item in enumerate(match_pairs, start=1):
+            if isinstance(item, dict):
+                item["id"] = set_id * 1000 + offset + idx
+                item["set_id"] = set_id
+
+
+# Simple translate endpoint using OpenAI (gpt-4o-mini)
+@router.post("/translate")
+async def translate_text_api(
+    text: str = Form(..., description="Text cần dịch"),
+    target_lang: str = Form("vi", description="Ngôn ngữ đích, mặc định 'vi'"),
+):
+    translated = await translate_text_via_llm(text, target_lang)
+    return {"translated_text": translated}
 
 
 def get_user_uuid(db: Session, user_id: str) -> uuid.UUID:
@@ -38,6 +119,8 @@ def get_user_uuid(db: Session, user_id: str) -> uuid.UUID:
             raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
         return user.id
 
+# ============= Synchronous Endpoints (Quick processing) =============
+
 @router.post("/summarize")
 async def summarize_text_sync(
     note: str = Form(...),
@@ -58,8 +141,10 @@ async def summarize_text_sync(
     
     if user_id and note_id:
         try:
+            # Get or create user
             user = db_service.get_or_create_user(db, username=user_id)
             
+            # Create or update note (upsert)
             db_service.create_note(
                 db=db,
                 user_id=str(user.id),
@@ -74,6 +159,7 @@ async def summarize_text_sync(
                 review=result.get('review')
             )
         except Exception as e:
+            # Log error nhưng không fail request
             print(f"Error saving to database: {e}")
     
     return result
@@ -98,32 +184,44 @@ async def process_input_sync(
     - note_id: Custom note ID từ app
     """
     if file:
+        # Đọc file một lần để dùng cho cả cache check và processing
         file_content = await file.read()
-        await file.seek(0) 
+        await file.seek(0)  # Reset file pointer
         file_size = len(file_content)
-        file_hash = hashlib.sha256(file_content).hexdigest()[:16] 
+        file_hash = hashlib.sha256(file_content).hexdigest()[:16]  # Lấy 16 ký tự đầu
         
+        # Kiểm tra cache: nếu note đã tồn tại và file không thay đổi, trả về kết quả đã lưu
         if user_id and note_id:
             try:
                 user = db_service.get_or_create_user(db, username=user_id)
                 existing_note = db_service.get_note_by_user_and_note_id(db, str(user.id), note_id)
                 
                 if existing_note:
+                    stable_checked = _stable_checked_vocab_items(checked_vocab_items)
                     current_content_hash = hashlib.sha256(
-                        f"FILE:{file.filename}:{file_hash}".encode('utf-8')
+                        f"FILE:{file.filename}:{file_hash}|MODE:{content_type or ''}|CHECKED:{stable_checked}".encode('utf-8')
                     ).hexdigest()
                     
+                    # Lấy hash đã lưu từ review (nếu có)
                     saved_review = existing_note.review or {}
                     saved_content_hash = saved_review.get('content_hash') if isinstance(saved_review, dict) else None
+                    saved_schema_version = saved_review.get('ai_schema_version') if isinstance(saved_review, dict) else None
                     
+                    # Nếu không có hash trong review, tính từ raw_text (backward compatibility)
                     if not saved_content_hash:
                         saved_content = existing_note.raw_text or ""
                         saved_content_hash = hashlib.sha256(
                             saved_content.encode('utf-8')
                         ).hexdigest()
                     
-                    if current_content_hash == saved_content_hash and existing_note.processed_text:
+                    # Nếu file giống nhau và đã có kết quả AI, trả về kết quả đã lưu
+                    if (
+                        current_content_hash == saved_content_hash
+                        and existing_note.processed_text
+                        and saved_schema_version == AI_RESULT_SCHEMA_VERSION
+                    ):
                         print(f"[cache] Note {note_id} found in DB, file unchanged, returning cached result")
+                        # Convert Note model sang format API response
                         result = {
                             'summary': existing_note.summary,
                             'summaries': existing_note.summaries,
@@ -134,6 +232,7 @@ async def process_input_sync(
                             'processed_text': existing_note.processed_text,
                         }
                         
+                        # Thêm vocab fields nếu có (lưu trong review JSON)
                         if existing_note.review:
                             review_data = existing_note.review
                             if isinstance(review_data, dict):
@@ -147,12 +246,15 @@ async def process_input_sync(
                                 if 'sources' in review_data:
                                     result['sources'] = review_data['sources']
                         
+                        # Reset ids for cloze/match pairs deterministically from content hash (avoid stale progress)
+                        _apply_reset_ids_for_cloze_and_match_pairs(result, current_content_hash)
                         return result
                     else:
                         print(f"[cache] Note {note_id} found but file changed, running AI again")
             except Exception as e:
                 print(f"Error checking cache: {e}")
         
+        # Chạy AI (file mới hoặc file đã thay đổi)
         result = await process_file(
             file,
             db=db,
@@ -161,10 +263,13 @@ async def process_input_sync(
             checked_vocab_items=checked_vocab_items,
         )
         
+        # Lưu vào database nếu có user_id và note_id
         if user_id and note_id:
             try:
+                # Get or create user
                 user = db_service.get_or_create_user(db, username=user_id)
                 
+                # Detect file type từ file_content đã đọc
                 from app.core.detector import detect_input_type
                 import tempfile
                 import os
@@ -175,6 +280,7 @@ async def process_input_sync(
                 file_type = detect_input_type(tmp.name)
                 os.remove(tmp.name)
                 
+                # Chuẩn bị review payload với content_hash
                 review_payload = result.get('review') or {}
                 if result.get('sources'):
                     review_payload = {
@@ -182,20 +288,27 @@ async def process_input_sync(
                         'sources': result.get('sources')
                     }
                 
+                # Thêm vocab fields vào review để lưu vào DB
                 if content_type == 'checklist':
                     review_payload['vocab_story'] = result.get('vocab_story')
                     review_payload['vocab_mcqs'] = result.get('vocab_mcqs')
                     review_payload['flashcards'] = result.get('flashcards')
-                    review_payload['mindmap'] = result.get('mindmap')
                     review_payload['summary_table'] = result.get('summary_table')
                     review_payload['cloze_tests'] = result.get('cloze_tests')
                     review_payload['match_pairs'] = result.get('match_pairs')
                 
+                # Lưu content_hash để so sánh lần sau
+                stable_checked = _stable_checked_vocab_items(checked_vocab_items)
                 content_hash = hashlib.sha256(
-                    f"FILE:{file.filename}:{file_hash}".encode('utf-8')
+                    f"FILE:{file.filename}:{file_hash}|MODE:{content_type or ''}|CHECKED:{stable_checked}".encode('utf-8')
                 ).hexdigest()
                 review_payload['content_hash'] = content_hash
+                review_payload['ai_schema_version'] = AI_RESULT_SCHEMA_VERSION
+
+                # Reset ids for cloze/match pairs deterministically from content hash (avoid stale progress)
+                _apply_reset_ids_for_cloze_and_match_pairs(result, content_hash)
                 
+                # Create note với review đã có content_hash
                 db_service.create_note(
                     db=db,
                     user_id=str(user.id),
@@ -215,29 +328,45 @@ async def process_input_sync(
                 print(f"Error saving to database: {e}")
                 
     elif text:
+        # Kiểm tra cache: nếu note đã tồn tại và nội dung không thay đổi, trả về kết quả đã lưu
         if user_id and note_id:
             try:
                 user = db_service.get_or_create_user(db, username=user_id)
                 existing_note = db_service.get_note_by_user_and_note_id(db, str(user.id), note_id)
                 
                 if existing_note:
+                    # Tính hash của text hiện tại để so sánh
+                    # Frontend tính hash với prefix: "vocab::" hoặc "text::" để phân biệt mode
+                    # Backend cần tính hash giống frontend để cache hoạt động đúng
                     hash_prefix = "vocab::" if content_type == "checklist" else "text::"
+                    stable_checked = _stable_checked_vocab_items(checked_vocab_items)
                     current_content_hash = hashlib.sha256(
-                        f"{hash_prefix}{text.strip()}".encode('utf-8')
+                        f"{hash_prefix}{text.strip()}|CHECKED:{stable_checked}".encode('utf-8')
                     ).hexdigest()
                     
+                    # Lấy hash đã lưu từ review (nếu có)
                     saved_review = existing_note.review or {}
                     saved_content_hash = saved_review.get('content_hash') if isinstance(saved_review, dict) else None
+                    saved_schema_version = saved_review.get('ai_schema_version') if isinstance(saved_review, dict) else None
                     
+                    # Nếu không có hash trong review, tính từ raw_text (backward compatibility)
+                    # Với prefix tương ứng dựa trên file_type hoặc content_type
                     if not saved_content_hash:
                         saved_content = existing_note.raw_text or ""
+                        # Xác định prefix dựa trên file_type hoặc content_type
                         saved_hash_prefix = "vocab::" if (content_type == "checklist" or existing_note.file_type == "checklist") else "text::"
                         saved_content_hash = hashlib.sha256(
                             f"{saved_hash_prefix}{saved_content}".encode('utf-8')
                         ).hexdigest()
                     
-                    if current_content_hash == saved_content_hash and existing_note.processed_text:
+                    # Nếu nội dung giống nhau và đã có kết quả AI, trả về kết quả đã lưu
+                    if (
+                        current_content_hash == saved_content_hash
+                        and existing_note.processed_text
+                        and saved_schema_version == AI_RESULT_SCHEMA_VERSION
+                    ):
                         print(f"[cache] Note {note_id} found in DB, content unchanged, returning cached result")
+                        # Convert Note model sang format API response
                         result = {
                             'summary': existing_note.summary,
                             'summaries': existing_note.summaries,
@@ -248,6 +377,7 @@ async def process_input_sync(
                             'processed_text': existing_note.processed_text,
                         }
                         
+                        # Thêm vocab fields nếu có (lưu trong review JSON)
                         if existing_note.review:
                             review_data = existing_note.review
                             if isinstance(review_data, dict):
@@ -258,15 +388,18 @@ async def process_input_sync(
                                 result['summary_table'] = review_data.get('summary_table')
                                 result['cloze_tests'] = review_data.get('cloze_tests')
                                 result['match_pairs'] = review_data.get('match_pairs')
+                                # Sources có thể lưu trong review
                                 if 'sources' in review_data:
                                     result['sources'] = review_data['sources']
                         
+                        _apply_reset_ids_for_cloze_and_match_pairs(result, current_content_hash)
                         return result
                     else:
                         print(f"[cache] Note {note_id} found but content changed, running AI again")
             except Exception as e:
                 print(f"Error checking cache: {e}")
         
+        # Chạy AI (nội dung mới hoặc note chưa tồn tại)
         result = await process_text(
             text,
             db=db,
@@ -277,8 +410,10 @@ async def process_input_sync(
         
         if user_id and note_id:
             try:
+                # Get or create user
                 user = db_service.get_or_create_user(db, username=user_id)
                 
+                # Chuẩn bị review payload với content_hash
                 review_payload = result.get('review') or {}
                 if result.get('sources'):
                     review_payload = {
@@ -286,6 +421,7 @@ async def process_input_sync(
                         'sources': result.get('sources')
                     }
                 
+                # Thêm vocab fields vào review để lưu vào DB
                 if content_type == 'checklist':
                     review_payload['vocab_story'] = result.get('vocab_story')
                     review_payload['vocab_mcqs'] = result.get('vocab_mcqs')
@@ -295,12 +431,21 @@ async def process_input_sync(
                     review_payload['cloze_tests'] = result.get('cloze_tests')
                     review_payload['match_pairs'] = result.get('match_pairs')
                 
+                # Lưu content_hash để so sánh lần sau
+                # Frontend tính hash với prefix: "vocab::" hoặc "text::" để phân biệt mode
+                # Backend cần tính hash giống frontend để cache hoạt động đúng
                 hash_prefix = "vocab::" if content_type == "checklist" else "text::"
+                stable_checked = _stable_checked_vocab_items(checked_vocab_items)
                 content_hash = hashlib.sha256(
-                    f"{hash_prefix}{text.strip()}".encode('utf-8')
+                    f"{hash_prefix}{text.strip()}|CHECKED:{stable_checked}".encode('utf-8')
                 ).hexdigest()
                 review_payload['content_hash'] = content_hash
+                review_payload['ai_schema_version'] = AI_RESULT_SCHEMA_VERSION
+
+                # Reset ids for cloze/match pairs deterministically from content hash (avoid stale progress)
+                _apply_reset_ids_for_cloze_and_match_pairs(result, content_hash)
                 
+                # Create note với review đã có content_hash
                 db_service.create_note(
                     db=db,
                     user_id=str(user.id),
@@ -340,29 +485,41 @@ async def process_combined_endpoint(
     - Nếu note đã tồn tại và nội dung không thay đổi → trả về kết quả đã lưu (không chạy lại AI)
     - Nếu note chưa tồn tại hoặc nội dung đã thay đổi → chạy AI và lưu kết quả mới
     """
+    # Xử lý files: FastAPI có thể trả về None hoặc empty list tùy cách client gửi
+    # Android app (Retrofit) gửi empty list [] khi không có files
+    # Swagger UI có thể không gửi field khi check "Send empty value"
     uploads = files if files is not None else []
     has_text = text_note and text_note.strip()
 
     if not has_text and not uploads:
         raise HTTPException(status_code=400, detail="Cần cung cấp ít nhất text_note hoặc files")
 
+    # Kiểm tra cache: nếu note đã tồn tại và nội dung không thay đổi, trả về kết quả đã lưu
     if user_id and note_id:
         try:
             user = db_service.get_or_create_user(db, username=user_id)
             existing_note = db_service.get_note_by_user_and_note_id(db, str(user.id), note_id)
             
             if existing_note:
+                # Tính hash của inputs hiện tại để so sánh
                 content_parts = []
                 if text_note:
                     content_parts.append(f"TEXT:{text_note.strip()}")
+                # Include mode + checked items so changing checklist selections also regenerates.
+                content_parts.append(f"MODE:{content_type or ''}")
+                stable_checked = _stable_checked_vocab_items(checked_vocab_items)
+                if stable_checked:
+                    content_parts.append(f"CHECKED:{stable_checked}")
+                # Thêm metadata của files (tên file + size) để detect thay đổi
                 if uploads:
                     file_metadata = []
                     for f in uploads:
                         filename = f.filename or "unknown"
                         try:
+                            # Đọc một phần file để tính hash (chỉ đọc 1KB đầu để tránh tốn bộ nhớ)
                             file_content = await f.read(1024)
-                            await f.seek(0) 
-                            file_hash = hashlib.sha256(file_content).hexdigest()[:16] 
+                            await f.seek(0)  # Reset file pointer
+                            file_hash = hashlib.sha256(file_content).hexdigest()[:16]  # Lấy 16 ký tự đầu
                         except:
                             file_hash = "0"
                         file_metadata.append(f"{filename}:{file_hash}")
@@ -372,17 +529,26 @@ async def process_combined_endpoint(
                     "|".join(content_parts).encode('utf-8')
                 ).hexdigest()
                 
+                # Lấy hash đã lưu từ review (nếu có)
                 saved_review = existing_note.review or {}
                 saved_content_hash = saved_review.get('content_hash') if isinstance(saved_review, dict) else None
+                saved_schema_version = saved_review.get('ai_schema_version') if isinstance(saved_review, dict) else None
                 
+                # Nếu không có hash trong review, tính từ raw_text (backward compatibility)
                 if not saved_content_hash:
                     saved_content = existing_note.raw_text or ""
                     saved_content_hash = hashlib.sha256(
                         saved_content.encode('utf-8')
                     ).hexdigest()
                 
-                if current_content_hash == saved_content_hash and existing_note.processed_text:
+                # Nếu nội dung giống nhau và đã có kết quả AI, trả về kết quả đã lưu
+                if (
+                    current_content_hash == saved_content_hash
+                    and existing_note.processed_text
+                    and saved_schema_version == AI_RESULT_SCHEMA_VERSION
+                ):
                     print(f"[cache] Note {note_id} found in DB, content unchanged, returning cached result")
+                    # Convert Note model sang format API response
                     result = {
                         'summary': existing_note.summary,
                         'summaries': existing_note.summaries,
@@ -393,19 +559,23 @@ async def process_combined_endpoint(
                         'processed_text': existing_note.processed_text,
                     }
                     
+                    # Thêm vocab fields nếu có (lưu trong review JSON)
                     if existing_note.review:
                         review_data = existing_note.review
                         if isinstance(review_data, dict):
+                            # Validate cached results trước khi trả về
                             vocab_story = review_data.get('vocab_story')
                             cloze_tests = review_data.get('cloze_tests')
                             match_pairs = review_data.get('match_pairs')
-
+                            
+                            # Validate vocab_story: chấp nhận nếu có ít nhất 1 đoạn (rất linh hoạt để đảm bảo hiển thị được)
                             if vocab_story:
                                 story_paras = vocab_story.get('paragraphs', [])
-                                if not isinstance(story_paras, list) or len(story_paras) < 5:
-                                    print(f"[cache] Cached vocab_story invalid ({len(story_paras) if isinstance(story_paras, list) else 0} paragraphs), will regenerate")
+                                if not isinstance(story_paras, list) or len(story_paras) < 1:
+                                    print(f"[cache] Cached vocab_story invalid ({len(story_paras) if isinstance(story_paras, list) else 0} paragraphs, required: 1+), will regenerate")
                                     vocab_story = None
                             
+                            # Validate cloze_tests: mỗi câu hỏi chỉ có 1 blank
                             if cloze_tests:
                                 valid_cloze = []
                                 for item in cloze_tests:
@@ -419,6 +589,7 @@ async def process_combined_endpoint(
                                     print(f"[cache] Cached cloze_tests invalid, will regenerate")
                                     cloze_tests = None
                             
+                            # Validate match_pairs: không được dùng placeholder
                             if match_pairs:
                                 valid_pairs = []
                                 for item in match_pairs:
@@ -437,27 +608,34 @@ async def process_combined_endpoint(
                                     print(f"[cache] Cached match_pairs invalid, will regenerate")
                                     match_pairs = None
                             
+                            # Nếu có phần nào invalid, cần regenerate
                             if not vocab_story or not cloze_tests or not match_pairs:
                                 print(f"[cache] Some cached results invalid, will regenerate")
+                                # Force regenerate bằng cách không return cached result, tiếp tục xuống dưới
                             else:
                                 result['vocab_story'] = vocab_story
                                 result['vocab_mcqs'] = review_data.get('vocab_mcqs')
                                 result['flashcards'] = review_data.get('flashcards')
+                                # mindmap không còn dùng: giữ None để tránh lỗi khóa
                                 result['mindmap'] = review_data.get('mindmap')
                                 result['summary_table'] = review_data.get('summary_table')
                                 result['cloze_tests'] = cloze_tests
                                 result['match_pairs'] = match_pairs
-                                if 'sources' in review_data:
-                                    result['sources'] = review_data['sources']
-                                
+                                # Reset ids for cloze/match pairs deterministically from content hash (avoid stale progress)
+                                _apply_reset_ids_for_cloze_and_match_pairs(result, current_content_hash)
                                 return result
-                    
+                            # Sources có thể lưu trong review
+                            if 'sources' in review_data:
+                                result['sources'] = review_data['sources']
+
+                    # Nếu không có review_data hoặc validation fail, tiếp tục generate mới
                     print(f"[cache] Note {note_id} found but validation failed or missing data, running AI again")
                 else:
                     print(f"[cache] Note {note_id} found but content changed, running AI again")
         except Exception as e:
             print(f"Error checking cache: {e}")
 
+    # Chạy AI (nội dung mới hoặc note chưa tồn tại)
     result = await process_combined_inputs(
         text_note=text_note,
         files=uploads,
@@ -467,6 +645,7 @@ async def process_combined_endpoint(
         checked_vocab_items=checked_vocab_items
     )
 
+    # Lưu kết quả vào DB
     if user_id and note_id:
         try:
             user = db_service.get_or_create_user(db, username=user_id)
@@ -477,25 +656,30 @@ async def process_combined_endpoint(
                     'sources': result.get('sources')
                 }
             
+            # Thêm vocab fields vào review để lưu vào DB
             if content_type == 'checklist':
                 review_payload['vocab_story'] = result.get('vocab_story')
                 review_payload['vocab_mcqs'] = result.get('vocab_mcqs')
                 review_payload['flashcards'] = result.get('flashcards')
-                review_payload['mindmap'] = result.get('mindmap')
                 review_payload['summary_table'] = result.get('summary_table')
                 review_payload['cloze_tests'] = result.get('cloze_tests')
                 review_payload['match_pairs'] = result.get('match_pairs')
             
+            # Lưu content_hash để so sánh lần sau
             content_parts = []
             if text_note:
                 content_parts.append(f"TEXT:{text_note.strip()}")
+            content_parts.append(f"MODE:{content_type or ''}")
+            stable_checked = _stable_checked_vocab_items(checked_vocab_items)
+            if stable_checked:
+                content_parts.append(f"CHECKED:{stable_checked}")
             if uploads:
                 file_metadata = []
                 for f in uploads:
                     filename = f.filename or "unknown"
                     try:
                         file_content = await f.read(1024)
-                        await f.seek(0) 
+                        await f.seek(0)  # Reset file pointer
                         file_hash = hashlib.sha256(file_content).hexdigest()[:16]
                     except:
                         file_hash = "0"
@@ -503,6 +687,10 @@ async def process_combined_endpoint(
                 content_parts.append(f"FILES:{'|'.join(file_metadata)}")
             content_hash = hashlib.sha256("|".join(content_parts).encode('utf-8')).hexdigest()
             review_payload['content_hash'] = content_hash
+            review_payload['ai_schema_version'] = AI_RESULT_SCHEMA_VERSION
+
+            # Reset ids for cloze/match pairs deterministically from content hash (avoid stale progress)
+            _apply_reset_ids_for_cloze_and_match_pairs(result, content_hash)
 
             db_service.create_note(
                 db=db,
@@ -524,6 +712,8 @@ async def process_combined_endpoint(
             print(f"Error saving combined note: {e}")
 
     return result
+
+# ============= Asynchronous Endpoints (Background processing) =============
 
 @router.post("/process/async")
 async def process_input_async(
@@ -579,6 +769,7 @@ async def get_job_result(job_id: str):
     result = job_service.get_job_result(job_id)
     
     if result is None:
+        # Check status để xem job có tồn tại không
         status = job_service.get_job_status(job_id)
         if status.get('status') == 'pending' or status.get('status') == 'processing':
             raise HTTPException(
@@ -599,6 +790,8 @@ async def get_job_result(job_id: str):
     return result
 
 
+# ============= Database Endpoints (History & Search) =============
+
 @router.get("/users/{user_id}/notes")
 async def get_user_notes(
     user_id: str,
@@ -618,6 +811,7 @@ async def get_user_notes(
     """
     from app.database.models import Note
     
+    # Get user UUID (support both UUID and username)
     user_uuid = get_user_uuid(db, user_id)
     
     notes = db_service.get_user_notes(
@@ -628,6 +822,7 @@ async def get_user_notes(
         file_type=file_type
     )
     
+    # Count total
     total_query = db.query(Note).filter(Note.user_id == user_uuid)
     if file_type:
         total_query = total_query.filter(Note.file_type == file_type)
@@ -675,6 +870,7 @@ async def get_note_by_id(
         'processed_text': note.processed_text,
     }
 
+    # Include vocab fields stored in review if present
     review_data = note.review
     if isinstance(review_data, dict):
         result['vocab_story'] = review_data.get('vocab_story')
@@ -743,6 +939,8 @@ async def delete_note(
     }
 
 
+# ============= Feedback Endpoints =============
+
 @router.post("/notes/{note_id}/feedback")
 async def submit_feedback(
     note_id: str,
@@ -768,6 +966,7 @@ async def submit_feedback(
     """
     import json
     
+    # Parse JSON arrays nếu có
     liked = None
     disliked = None
     if liked_aspects:
@@ -921,6 +1120,8 @@ async def sync_note_result(
     }
 
 
+# ============= Debug Endpoints =============
+
 @router.post("/debug/test-ocr")
 async def debug_test_ocr(
     file: UploadFile = File(...)
@@ -938,6 +1139,7 @@ async def debug_test_ocr(
     import pytesseract
     from PIL import Image
     
+    # Save file to temp location
     suffix = os.path.splitext(file.filename)[1]
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     contents = await file.read()
@@ -975,6 +1177,7 @@ async def debug_test_ocr(
                 "tesseract_configured_path": configured_path
             }
         
+        # Test OCR
         text, error_message = process_image_file(file_path)
         
         result = {
@@ -993,6 +1196,7 @@ async def debug_test_ocr(
         return result
         
     finally:
+        # Cleanup
         try:
             os.remove(file_path)
         except:
@@ -1017,6 +1221,7 @@ async def debug_celery_status():
         "errors": []
     }
     
+    # Test Redis connection
     try:
         redis_client = redis.from_url(result["redis_url"])
         redis_client.ping()
@@ -1025,12 +1230,15 @@ async def debug_celery_status():
         result["errors"].append(f"Redis connection error: {e}")
         return result
     
+    # Inspect workers
     try:
         inspect = celery_app.control.inspect()
         
+        # Get active workers
         active_workers = inspect.active()
         if active_workers:
             result["celery_workers"] = list(active_workers.keys())
+            # Get active tasks
             for worker_name, tasks in active_workers.items():
                 for task in tasks:
                     result["active_tasks"].append({
@@ -1042,15 +1250,19 @@ async def debug_celery_status():
         else:
             result["errors"].append("No active Celery workers found!")
         
+        # Get registered workers
         registered = inspect.registered()
         if registered:
             result["registered_workers"] = list(registered.keys())
         
+        # Get stats
         stats = inspect.stats()
         if stats:
             result["worker_stats"] = stats
         
+        # Count pending tasks (approximate)
         try:
+            # Get queue length from Redis
             queue_key = celery_app.conf.task_default_queue or 'celery'
             pending_count = redis_client.llen(queue_key)
             result["pending_tasks"] = pending_count

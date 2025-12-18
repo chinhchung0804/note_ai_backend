@@ -38,6 +38,7 @@ async def process_text(
         db: Database session (optional, để dùng RAG)
         use_rag: Có sử dụng RAG để cải thiện prompt không (default: True)
     """
+    # Step 1: Clean text
     txt = clean_text(text)
     
     if content_type == 'checklist':
@@ -58,6 +59,7 @@ async def process_text(
             match_pairs=vocab_bundle.get('match_pairs'),
         )
 
+    # Step 2: Generate learning assets (summaries, questions, MCQs)
     learning_assets = await generate_learning_assets(
         raw_text=txt,
         db=db,
@@ -65,6 +67,7 @@ async def process_text(
         use_rag=use_rag
     )
 
+    # Step 3: Build output
     return build_output(
         summaries=learning_assets.get('summaries'),
         review={'valid': True, 'notes': 'Text input trực tiếp'},
@@ -151,6 +154,7 @@ async def _extract_text_from_upload(upload_file):
             os.remove(file_path)
         except:
             pass
+        # Reset pointer để có thể đọc lại ở nơi khác nếu cần
         await upload_file.seek(0)
 
 
@@ -240,20 +244,22 @@ async def process_combined_inputs(
 
     for upload_file in files:
         extracted = await _extract_text_from_upload(upload_file)
+        # Fallback: nếu processed_text rỗng nhưng raw_text có, dùng raw_text
+        proc_text = extracted.get('processed_text') or extracted.get('raw_text') or ''
         source_entry = {
             'type': extracted['input_type'],
             'source': upload_file.filename,
-            'raw_text': extracted['raw_text'],
-            'processed_text': extracted['processed_text'],
+            'raw_text': extracted.get('raw_text'),
+            'processed_text': proc_text,
             'review': extracted['review']
         }
         if extracted['error']:
             source_entry['error'] = extracted['error']
         sources.append(source_entry)
 
-        if extracted['processed_text']:
+        if proc_text:
             label = upload_file.filename or extracted['input_type']
-            combined_chunks.append(f"[Source: {label}]\\n{extracted['processed_text']}")
+            combined_chunks.append(f"[Source: {label}]\\n{proc_text}")
 
     if not combined_chunks:
         return build_output(
@@ -266,35 +272,41 @@ async def process_combined_inputs(
 
     combined_text = "\\n\\n".join(combined_chunks)
 
-    learning_assets = await generate_learning_assets(
-        raw_text=combined_text,
-        db=db,
-        file_type='combined',
-        use_rag=use_rag
-    )
+    # Log để debug: xác nhận content_type từ frontend
+    print(f"[orchestrator] process_combined_inputs: content_type='{content_type}', has_text={bool(text_note)}, has_files={len(files) > 0}, checked_vocab_items_length={len(checked_vocab_items) if checked_vocab_items else 0}")
 
+    # Chỉ gen các chức năng phù hợp với từng loại note
     if content_type == 'checklist':
+        # Checklist: CHỈ gen 6 chức năng vocab (vocab_summary_table, vocab_story, vocab_mcqs, flashcards, mindmap, cloze_tests, match_pairs)
+        print(f"[orchestrator] Generating vocab bundle for checklist (6 features)")
         vocab_bundle = await generate_vocab_bundle(
             combined_text,
             checked_vocab_items
         )
         return build_output(
-            summaries=learning_assets.get('summaries'),
+            summaries=None,  # Không gen summaries cho checklist
             review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input - checklist'},
             raw_text=combined_text,
             processed_text=combined_text,
-            questions=learning_assets.get('questions'),
-            mcqs=learning_assets.get('mcqs'),
+            questions=[],  # Không gen questions cho checklist
+            mcqs={},  # Không gen MCQs cho checklist
             sources=sources,
             vocab_story=vocab_bundle['vocab_story'],
             vocab_mcqs=vocab_bundle['vocab_mcqs'],
             flashcards=vocab_bundle['flashcards'],
-            mindmap=vocab_bundle['mindmap'],
             summary_table=vocab_bundle['summary_table'],
             cloze_tests=vocab_bundle.get('cloze_tests'),
             match_pairs=vocab_bundle.get('match_pairs'),
         )
-
+    else:
+        # Text note: CHỈ gen 4 chức năng (summaries, questions, mcqs)
+        print(f"[orchestrator] Generating learning assets for text note (4 features)")
+        learning_assets = await generate_learning_assets(
+            raw_text=combined_text,
+            db=db,
+            file_type='combined',
+            use_rag=use_rag
+        )
     return build_output(
         summaries=learning_assets.get('summaries'),
         review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input'},

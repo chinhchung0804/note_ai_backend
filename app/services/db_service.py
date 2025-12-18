@@ -110,6 +110,7 @@ class DatabaseService:
         existing_note = DatabaseService.get_note_by_user_and_note_id(db, user_id, note_id)
 
         if existing_note:
+            # Chỉ cập nhật metadata, không đổi user_id hay dùng fallback note_id chung
             if file_type is not None:
                 existing_note.file_type = file_type
             if filename is not None:
@@ -308,6 +309,7 @@ class DatabaseService:
         if processed_at is not None:
             note.processed_at = processed_at
         elif processed_text is not None or summary is not None:
+            # Auto set processed_at nếu đang update kết quả xử lý
             note.processed_at = datetime.utcnow()
         
         db.commit()
@@ -439,5 +441,7 @@ class DatabaseService:
         db.commit()
         return True
 
+
+# Global instance
 db_service = DatabaseService()
 

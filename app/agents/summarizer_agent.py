@@ -7,19 +7,35 @@ from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from sqlalchemy.orm import Session
 
-from app.agents.llm_config import (
-    get_openai_chat_llm,
-    get_gemini_chat_llm,
-)
+from app.agents.llm_config import get_openai_chat_llm
 
-PRIMARY_LLM = get_openai_chat_llm(temperature=0.3)
+# Primary: OpenAI (model set via OPENAI_MODEL, khuyến nghị gpt-4o-mini)
+PRIMARY_LLM = get_openai_chat_llm(temperature=0.2)
+TRANSLATE_LLM = PRIMARY_LLM  # dùng chung model để dịch on-demand
 
+# Timeout (seconds) cho mọi call tới LLM – tăng để tránh bị cắt sớm khi gen nhiều feature vocab
+LLM_TIMEOUT_SECONDS = 300.0
+
+# Stopwords (English) để loại bỏ từ không hữu ích khi tạo vocab list
 STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "at",
     "by", "from", "up", "about", "into", "over", "after", "under", "above",
     "below", "is", "are", "was", "were", "be", "been", "being",
     "this", "that", "these", "those", "it", "its", "as", "but",
 }
+
+# Luật chung chống bịa/placeholder (prepend vào mọi prompt)
+GLOBAL_VOCAB_RULES = (
+    "QUY TẮC TUYỆT ĐỐI (ÁP DỤNG CHO TẤT CẢ OUTPUT):\n"
+    "- CHỈ sử dụng đúng các từ có trong vocab_list.\n"
+    "- KHÔNG được tự ý thêm, suy đoán, diễn giải lại hoặc thay thế từ vựng bằng từ mới.\n"
+    "- Mỗi từ vựng phải được xử lý ĐỘC LẬP, không phụ thuộc các từ khác.\n"
+    "- Nếu một từ vựng KHÔNG đáp ứng ĐẦY ĐỦ các yêu cầu, PHẢI BỎ QUA từ đó.\n"
+    "- KHÔNG tạo nội dung mâu thuẫn với nghĩa, thời gian, hành động hoặc ngữ cảnh trong raw_text.\n"
+    "- KHÔNG dùng placeholder, KHÔNG để trống trường dữ liệu, KHÔNG dùng mô tả mơ hồ.\n"
+    "- Tất cả nghĩa tiếng Việt PHẢI chính xác và đầy đủ (KHÔNG để nguyên tiếng Anh).\n"
+    "- Output BẮT BUỘC là JSON thuần hợp lệ (dùng double quotes, KHÔNG markdown, KHÔNG text thừa).\n"
+)
 
 summary_prompt_template = PromptTemplate(
     input_variables=['instructions', 'raw_text'],
@@ -69,7 +85,7 @@ mcq_prompt_template = PromptTemplate(
         "- KHÔNG được copy-paste toàn bộ nội dung ghi chú vào câu hỏi\n"
         "- KHÔNG được đặt câu hỏi dạng 'Dựa trên ghi chú, ý nào mô tả chính xác nhất: [toàn bộ đoạn văn dài]'\n"
         "- Câu hỏi phải độc lập, có thể hiểu được mà không cần đọc lại toàn bộ ghi chú\n"
-        "- Mỗi độ khó (easy, medium, hard) tạo từ 1-3 câu hỏi\n"
+        "- Mỗi độ khó (easy, medium, hard) tạo từ 3-5 câu hỏi\n"
         "- Mỗi câu hỏi phải kiểm tra hiểu biết về nội dung ghi chú, không chỉ nhớ máy móc\n\n"
         "YÊU CẦU VỀ ĐÁP ÁN:\n"
         "- Mỗi câu có 4 phương án A, B, C, D\n"
@@ -113,429 +129,291 @@ summary_chain = LLMChain(llm=PRIMARY_LLM, prompt=summary_prompt_template)
 question_chain = LLMChain(llm=PRIMARY_LLM, prompt=question_prompt_template)
 mcq_chain = LLMChain(llm=PRIMARY_LLM, prompt=mcq_prompt_template)
 
+# Vocab checklist prompts
 vocab_summary_table_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
+    input_variables=["raw_text", "vocab_list"],
+    template_format="jinja2",
     template=(
-        "Bạn là chuyên gia dạy từ vựng tiếng Anh. Dựa trên danh sách từ vựng và ngữ cảnh sau, "
-        "hãy tạo bảng tóm tắt CHI TIẾT và THỰC TẾ cho từng từ.\n\n"
-        "FORMAT YÊU CẦU:\n"
-        "- Trả về CHỈ JSON thuần túy (mảng), không có markdown code blocks (```json```)\n"
-        "- Không có text thêm trước hoặc sau JSON\n"
-        "- Đảm bảo tất cả Unicode characters được encode đúng (không có invalid \\u escape sequences)\n"
-        "- Sử dụng double quotes cho strings, escape đúng các ký tự đặc biệt\n\n"
-        "YÊU CẦU QUAN TRỌNG:\n"
-        "- Tối đa 15 từ vựng.\n"
-        "- Nếu vocab_list có từ, ƯU TIÊN dùng các từ đó; nếu không, tự chọn từ khóa chính trong raw_text.\n"
-        "- Loại bỏ stopwords (the, a, an, and, with, of, ...), chỉ giữ danh/động/tính từ nội dung.\n"
-        "- Mỗi từ PHẢI có nội dung THỰC TẾ, CỤ THỂ, KHÔNG dùng placeholder như 'Nghĩa của X', 'Định nghĩa ngắn gọn về X'.\n"
-        "- Translation: nghĩa tiếng Việt CHÍNH XÁC của từ\n"
-        "- Definition: định nghĩa tiếng Anh ngắn gọn nhưng ĐẦY ĐỦ (1-2 câu)\n"
-        "- Usage_note: hướng dẫn cách dùng CỤ THỂ trong ngữ cảnh thực tế\n"
-        "- Common_structures: các cấu trúc ngữ pháp THỰC TẾ mà từ này thường dùng (ví dụ: 'to + verb', 'verb + object')\n"
-        "- Collocations: các cụm từ THỰC TẾ thường đi kèm với từ này (ví dụ: 'make a decision', 'take action')\n\n"
-        "VÍ DỤ ĐÚNG:\n"
-        "{{\n"
-        '  "word": "decision",\n'
-        '  "translation": "quyết định",\n'
-        '  "part_of_speech": "noun",\n'
-        '  "definition": "a choice or judgment that you make after thinking about various possibilities",\n'
-        '  "usage_note": "Dùng với động từ make/take: make a decision, take a decision. Không dùng do a decision",\n'
-        '  "common_structures": ["make a decision", "decision to do something", "decision on/about"],\n'
-        '  "collocations": ["make a decision", "reach a decision", "final decision", "tough decision"]\n'
-        "}}\n\n"
-        "VÍ DỤ SAI (KHÔNG ĐƯỢC LÀM):\n"
-        "{{\n"
-        '  "word": "decision",\n'
-        '  "translation": "Nghĩa của decision",\n'
-        '  "definition": "Định nghĩa ngắn gọn về decision",\n'
-        '  "usage_note": "Cách dùng decision trong câu"\n'
-        "}}\n\n"
-        "Schema JSON:\n"
-        "[\n"
-        '  {{\n'
-        '    "word": "từ vựng thực tế",\n'
-        '    "translation": "nghĩa tiếng Việt chính xác",\n'
-        '    "part_of_speech": "noun/verb/adj/adv",\n'
-        '    "definition": "định nghĩa tiếng Anh đầy đủ (1-2 câu)",\n'
-        '    "usage_note": "hướng dẫn cách dùng cụ thể",\n'
-        '    "common_structures": ["cấu trúc thực tế 1", "cấu trúc thực tế 2"],\n'
-        '    "collocations": ["cụm từ thực tế 1", "cụm từ thực tế 2"]\n'
-        '  }}\n'
-        "]\n\n"
-        "vocab_list:\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
+        GLOBAL_VOCAB_RULES +
+        "Bạn là chuyên gia dạy từ vựng tiếng Anh cho người học Việt Nam. "
+        "Tạo bảng tóm tắt từ vựng CHI TIẾT – THỰC TẾ – DÙNG ĐƯỢC.\n\n"
+
+        "FORMAT (BẮT BUỘC):\n"
+        "- Trả về CHỈ JSON thuần (mảng), KHÔNG markdown, KHÔNG text thừa\n"
+        "- Unicode hợp lệ, dùng double quotes\n\n"
+
+        "QUAN TRỌNG - SỬ DỤNG CONTEXT:\n"
+        "- raw_text chứa ngữ cảnh thực tế của bài học\n"
+        "- Nếu từ trong vocab_list CÓ trong raw_text: sử dụng ngữ cảnh đó để giải thích\n"
+        "- Nếu từ trong vocab_list KHÔNG có trong raw_text: giải thích nghĩa từ điển CHÍNH XÁC\n"
+        "- Translation PHẢI là nghĩa tiếng Việt CHÍNH XÁC (ví dụ: hand = bàn tay, foot = bàn chân, không được để nguyên 'hand')\n\n"
+
+        "YÊU CẦU NỘI DUNG:\n"
+        "- Số lượng mục PHẢI bằng số lượng từ trong vocab_list (trừ khi vocab_list trống)\n"
+        "- KHÔNG được suy luận hoặc tạo thêm từ\n"
+        "- Ưu tiên vocab_list; nếu trống, trích từ khóa chính trong raw_text\n"
+        "- Loại bỏ stopwords (the, and, with, of, ...)\n"
+        "- KHÔNG dùng placeholder\n"
+        "- Translation: nghĩa tiếng Việt CHÍNH XÁC (bắt buộc phải dịch, không được để nguyên tiếng Anh)\n"
+        "- Phonetic: phiên âm IPA nếu có (ví dụ: /hænd/ cho hand). Nếu không rõ, bỏ trống.\n"
+        "- Definition: định nghĩa tiếng Việt 1–2 câu, đầy đủ\n"
+        "- Usage_note: cách dùng CỤ THỂ trong đời thực\n"
+        "- Common_structures & Collocations: dạng NGƯỜI BẢN NGỮ hay dùng\n\n"
+
+        "Schema JSON (giữ nguyên dấu ngoặc):\n"
+        "{% raw %}[\n"
+        "  {\n"
+        "    \"word\": \"từ\",\n"
+        "    \"translation\": \"nghĩa tiếng Việt\",\n"
+        "    \"phonetic\": \"/phiên âm IPA/\",\n"
+        "    \"part_of_speech\": \"noun/verb/adj/adv\",\n"
+        "    \"definition\": \"định nghĩa tiếng Việt\",\n"
+        "    \"usage_note\": \"hướng dẫn dùng thực tế\",\n"
+        "    \"common_structures\": [\"cấu trúc thực tế\"],\n"
+        "    \"collocations\": [\"cụm từ thực tế\"]\n"
+        "  }\n"
+        "]\n{% endraw %}\n"
+
+        "vocab_list:\n{{ vocab_list }}\n\n"
+        "raw_text (ngữ cảnh thực tế):\n{{ raw_text }}"
     )
 )
 
 vocab_story_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
+    input_variables=["raw_text", "vocab_list"],
+    template_format="jinja2",
     template=(
-        "Bạn là người viết truyện ngắn sáng tạo để học từ vựng tiếng Anh. Dựa trên vocab_list và raw_text, "
-        "hãy viết một câu chuyện DÀI HƠN, HẤP DẪN, có cốt truyện HOÀN CHỈNH với ngữ cảnh QUEN THUỘC và DỄ HIỂU.\n\n"
-        "FORMAT YÊU CẦU:\n"
-        "- Trả về CHỈ JSON thuần túy, không có markdown code blocks (```json```)\n"
-        "- Không có text thêm trước hoặc sau JSON\n"
-        "- Đảm bảo tất cả Unicode characters được encode đúng (không có invalid \\u escape sequences)\n"
-        "- Sử dụng double quotes cho strings, escape đúng các ký tự đặc biệt\n\n"
-        "YÊU CẦU QUAN TRỌNG (BẮT BUỘC):\n"
-        "- Câu chuyện phải TỰ NHIÊN, có cốt truyện RÕ RÀNG và HOÀN CHỈNH với mở đầu, phát triển, và kết thúc\n"
-        "- ĐỘ DÀI BẮT BUỘC: Tối thiểu 5 đoạn, mỗi đoạn tối thiểu 3 câu (tổng cộng ít nhất 15 câu). KHÔNG được tạo câu chuyện ngắn chỉ 2-3 câu!\n"
-        "- Tất cả các từ trong vocab_list PHẢI xuất hiện trong câu chuyện và được đánh dấu **bold** trong paragraphs; KHÔNG đưa stopwords như 'the/and/with'\n"
-        "- Mỗi từ trong vocab_list nên xuất hiện ÍT NHẤT 1-2 lần trong câu chuyện để người học có cơ hội gặp lại\n"
-        "- Ngữ cảnh phải QUEN THUỘC, dễ liên tưởng (ví dụ: cuộc sống hàng ngày, học tập, công việc, du lịch, tình bạn)\n"
-        "- Câu chuyện phải có TÍNH LIÊN KẾT giữa các đoạn, tạo thành một câu chuyện HOÀN CHỈNH, không phải các câu rời rạc\n"
-        "- Câu chuyện phải giúp người học GHI NHỚ từ vựng thông qua ngữ cảnh và cốt truyện hấp dẫn\n"
-        "- Sử dụng từ vựng một cách TỰ NHIÊN, đúng ngữ pháp, trong các tình huống thực tế\n"
-        "- Nếu vocab_list có nhiều từ, hãy phân bố đều các từ trong suốt câu chuyện, không tập trung tất cả ở đầu hoặc cuối\n"
-        "- LƯU Ý: Nếu bạn tạo câu chuyện quá ngắn (dưới 5 đoạn), kết quả sẽ bị từ chối. Hãy viết một câu chuyện ĐẦY ĐỦ và HẤP DẪN!\n\n"
-        "VÍ DỤ:\n"
-        "vocab_list: decision, option, choice, reduction, provider\n"
-        "Câu chuyện:\n"
-        "{{\n"
-        '  "title": "A Difficult Decision",\n'
-        '  "paragraphs": [\n'
-        '    "Sarah stood at the crossroads, facing a difficult **decision**. She had two job offers: one in the city, one in the countryside.",\n'
-        '    "Each **option** had its advantages. The city job offered more money, but the countryside **choice** promised a better work-life balance. She consulted her career **provider** for advice.",\n'
-        '    "The career **provider** suggested considering a **reduction** in salary might be worth it for better quality of life. This made Sarah reconsider her **decision** carefully.",\n'
-        '    "After weighing all the **options**, Sarah realized that the **choice** wasn\'t just about money. A small **reduction** in income could lead to greater happiness.",\n'
-        '    "Finally, she made her **decision** and chose the countryside position. Her career **provider** congratulated her on making the right **choice**."\n'
-        '  ],\n'
-        '  "used_words": [{{"word": "decision", "bolded": true}}, {{"word": "option", "bolded": true}}, {{"word": "choice", "bolded": true}}, {{"word": "reduction", "bolded": true}}, {{"word": "provider", "bolded": true}}]\n'
-        "}}\n\n"
-        "Schema JSON:\n"
-        "{{\n"
-        '  "title": "Tiêu đề câu chuyện ngắn gọn",\n'
-        '  "paragraphs": ["Đoạn 1 với **từ in đậm**", "Đoạn 2 với **từ in đậm**", "... (5-8 đoạn)"],\n'
-        '  "used_words": [{{"word": "từ 1", "bolded": true}}, {{"word": "từ 2", "bolded": true}}]\n'
-        "}}\n\n"
-        "QUAN TRỌNG:\n"
-        "- vocab_list là DANH SÁCH CÁC TỪ RIÊNG BIỆT, mỗi từ trên một dòng hoặc cách nhau bởi dấu phẩy\n"
-        "- Tất cả các từ trong vocab_list PHẢI xuất hiện trong paragraphs và được đánh dấu **bold**\n"
-        "- Mỗi từ trong vocab_list là MỘT TỪ RIÊNG BIỆT, không phải một cụm từ dài\n"
-        "- Câu chuyện phải DÀI HƠN (5-8 đoạn, mỗi đoạn 3-5 câu) để tạo ngữ cảnh đầy đủ cho việc học từ vựng\n"
-        "- Câu chuyện phải có cốt truyện HOÀN CHỈNH, không phải các câu rời rạc\n"
-        "- KHÔNG được coi toàn bộ vocab_list như một từ duy nhất; phải tách từng từ và sử dụng riêng biệt\n\n"
-        "vocab_list (mỗi từ trên một dòng):\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
+        GLOBAL_VOCAB_RULES +
+        "Bạn là người viết truyện giúp người học ghi nhớ từ vựng tiếng Anh.\n"
+        "Hãy viết một CÂU CHUYỆN NGẮN, RÕ RÀNG **BẰNG TIẾNG ANH 100%** sử dụng tự nhiên các từ trong vocab_list.\n\n"
+
+        "YÊU CẦU:\n"
+        "- Nội dung câu chuyện PHẢI là tiếng Anh tự nhiên (KHÔNG chèn tiếng Việt; các từ vựng bản thân đã là tiếng Anh).\n"
+        "- KHÔNG được đưa vào các đối tượng, hành động hoặc khái niệm trái ngược hoàn toàn với nghĩa của từ vựng.\n"
+        "- BẮT BUỘC: Phải có ÍT NHẤT 4 đoạn văn (paragraphs), mỗi đoạn 2–4 câu đầy đủ. KHÔNG được ít hơn 4 đoạn.\n"
+        "- Câu chuyện nên liên quan và không mâu thuẫn với ngữ cảnh trong raw_text (nếu có).\n"
+        "- TẤT CẢ các từ trong vocab_list phải xuất hiện và được **bôi đậm** đúng chỗ sử dụng; mỗi từ tối đa 2 lần.\n"
+        "- CHỈ trả về JSON thuần, không có markdown bên ngoài JSON.\n\n"
+
+        "Schema JSON (GIỮ NGUYÊN):\n"
+        "{% raw %}{\n"
+        '  "title": "Tiêu đề tiếng Anh ngắn gọn",\n'
+        '  "paragraphs": ["Đoạn tiếng Anh có **từ**", "..."],\n'
+        '  "used_words": [{"word": "từ", "bolded": true}]\n'
+        "}\n{% endraw %}\n\n"
+
+        "vocab_list:\n{{ vocab_list }}\n\n"
+        "raw_text (ngữ cảnh nếu có):\n{{ raw_text }}"
     )
 )
 
 vocab_mcq_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
+    input_variables=["raw_text", "vocab_list"],
+    template_format="jinja2",
     template=(
-        "Bạn là giáo viên chuyên tạo câu hỏi trắc nghiệm từ vựng chất lượng cao. Tạo 8-10 câu MCQ, "
-        "mỗi câu có 4 đáp án A-D, có lời giải thích chi tiết. Câu hỏi bằng tiếng Việt, đáp án là từ vựng tiếng Anh trong vocab_list.\n\n"
-        "FORMAT YÊU CẦU:\n"
-        "- Trả về CHỈ JSON thuần túy (mảng), không có markdown code blocks (```json```)\n"
-        "- Không có text thêm trước hoặc sau JSON\n"
-        "- Đảm bảo tất cả Unicode characters được encode đúng (không có invalid \\u escape sequences)\n"
-        "- Sử dụng double quotes cho strings, escape đúng các ký tự đặc biệt\n\n"
-        "YÊU CẦU QUAN TRỌNG:\n"
-        "- Mỗi câu hỏi phải kiểm tra hiểu biết về TỪ VỰNG CỤ THỂ, không phải generic\n"
-        "- Câu hỏi phải RÕ RÀNG, CỤ THỂ về nghĩa, cách dùng, hoặc ngữ cảnh của từ\n"
-        "- Các đáp án PHẢI có NỘI DUNG THỰC TẾ, CỤ THỂ, KHÔNG được dùng placeholder như 'Ý đúng về X' hay 'Ý sai gần với X'\n"
-        "- Đáp án đúng phải là định nghĩa/nghĩa/cách dùng CHÍNH XÁC của từ\n"
-        "- Các đáp án sai phải là định nghĩa/nghĩa/cách dùng của từ KHÁC nhưng có vẻ hợp lý\n"
-        "- Explanation phải giải thích CỤ THỂ tại sao đáp án đúng và tại sao các phương án khác sai\n"
-        "- When_wrong phải đưa ra gợi ý CỤ THỂ để nhớ từ này\n\n"
-        "- Chỉ dùng từ vựng nội dung (không dùng stopwords như the/and/with)\n"
-        "CÁC LOẠI CÂU HỎI:\n"
-        "1. Câu hỏi về nghĩa: 'Từ nào sau đây có nghĩa là [định nghĩa cụ thể]?'\n"
-        "2. Câu hỏi điền từ: 'Chọn từ phù hợp: I need to [context cụ thể]'\n"
-        "3. Câu hỏi về cách dùng: 'Từ nào được dùng đúng trong câu: [câu ví dụ]?'\n"
-        "4. Câu hỏi về collocation: 'Từ nào đi với [từ khác] để tạo cụm từ đúng?'\n\n"
-        "VÍ DỤ ĐÚNG:\n"
-        "{{\n"
-        '  "id": 1,\n'
-        '  "type": "vocab_mcq",\n'
-        '  "vocab_target": "decision",\n'
-        '  "question": "Từ nào sau đây có nghĩa là \'a choice or judgment made after thinking\'?",\n'
-        '  "options": {{\n'
-        '    "A": "decision",\n'
-        '    "B": "option",\n'
-        '    "C": "selection",\n'
-        '    "D": "preference"\n'
-        '  }},\n'
-        '  "answer": "A",\n'
-        '  "explanation": "Decision có nghĩa là quyết định sau khi suy nghĩ. Option là lựa chọn, selection là sự lựa chọn, preference là sở thích",\n'
-        '  "when_wrong": "Nhớ: decision = quyết định (make a decision), khác với option (lựa chọn) hay preference (sở thích)"\n'
-        "}}\n\n"
-        "VÍ DỤ SAI (KHÔNG ĐƯỢC LÀM):\n"
-        "{{\n"
-        '  "question": "Từ nào diễn đạt ý gần nhất với \'decision\'?",\n'
-        '  "options": {{\n'
-        '    "A": "Ý đúng về decision",\n'
-        '    "B": "Ý sai gần với decision",\n'
-        '    "C": "Ý sai khác về decision",\n'
-        '    "D": "Ý sai không liên quan decision"\n'
-        '  }}\n'
-        "}}\n\n"
-        "Schema JSON (mảng):\n"
-        "[\n"
-        '  {{\n'
-        '    "id": 1,\n'
-        '    "type": "vocab_mcq",\n'
-        '    "vocab_target": "từ đang kiểm tra",\n'
-        '    "question": "Câu hỏi cụ thể về nghĩa/cách dùng/ngữ cảnh",\n'
-        '    "options": {{"A": "đáp án cụ thể 1", "B": "đáp án cụ thể 2", "C": "đáp án cụ thể 3", "D": "đáp án cụ thể 4"}},\n'
-        '    "answer": "A",\n'
-        '    "explanation": "Giải thích cụ thể tại sao đúng/sai",\n'
-        '    "when_wrong": "Gợi ý cụ thể để nhớ từ này"\n'
-        '  }}\n'
-        "]\n\n"
-        "vocab_list:\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
+        GLOBAL_VOCAB_RULES +
+        "You are an English test item writer creating HIGH-QUALITY vocabulary MCQs.\n\n"
+
+        "MANDATORY RULES:\n"
+        "- Each vocab item → EXACTLY 2 questions:\n"
+        "  (1) question_type = \"meaning\" → definition-based question\n"
+        "  (2) question_type = \"context\" → sentence-based usage question\n"
+        "- If BOTH questions cannot be made CLEARLY DIFFERENT → SKIP that vocab.\n\n"
+
+        "QUESTION DESIGN RULES:\n"
+        "MEANING QUESTION:\n"
+        "- Ask about definition, synonym, or concept.\n"
+        "- MUST follow patterns used in real exams, e.g.:\n"
+        "  • \"Which word best describes …?\"\n"
+        "  • \"Which word means …?\"\n"
+        "- DO NOT mention any sentence or situation.\n\n"
+
+        "CONTEXT QUESTION:\n"
+        "- MUST include a short English sentence with a blank.\n"
+        "- Ask which word best completes the sentence.\n"
+        "- Sentence MUST be realistic and similar to school / TOEIC-style questions.\n\n"
+
+        "OPTIONS RULES:\n"
+        "- 4 options A/B/C/D.\n"
+        "- ALL options must be English words from vocab_list.\n"
+        "- ONLY ONE correct answer.\n"
+        "- Distractors must be plausible but incorrect.\n\n"
+
+        "EXPLANATION RULES:\n"
+        "- Explanation MUST teach:\n"
+        "  • For meaning: explain core meaning + why others are wrong.\n"
+        "  • For context: explain why it fits the sentence context.\n"
+        "- Written in Vietnamese, 1–2 clear sentences.\n\n"
+
+        "OUTPUT FORMAT:\n"
+        "- JSON ONLY, no markdown, no extra text.\n\n"
+
+        "Schema JSON:\n"
+        "{% raw %}[\n"
+        "  {\n"
+        "    \"id\": 1,\n"
+        "    \"type\": \"vocab_mcq\",\n"
+        "    \"question_type\": \"meaning\",\n"
+        "    \"vocab_target\": \"word\",\n"
+        "    \"question\": \"English exam-style question\",\n"
+        "    \"options\": {\"A\": \"\", \"B\": \"\", \"C\": \"\", \"D\": \"\"},\n"
+        "    \"answer\": \"A | B | C | D\",\n"
+        "    \"explanation\": \"Giải thích nghĩa và phân biệt phương án sai\",\n"
+        "    \"when_wrong\": \"Lỗi hiểu nghĩa thường gặp\"\n"
+        "  },\n"
+        "  {\n"
+        "    \"id\": 2,\n"
+        "    \"type\": \"vocab_mcq\",\n"
+        "    \"question_type\": \"context\",\n"
+        "    \"vocab_target\": \"word\",\n"
+        "    \"question\": \"Choose the word that best completes the sentence\",\n"
+        "    \"options\": {\"A\": \"\", \"B\": \"\", \"C\": \"\", \"D\": \"\"},\n"
+        "    \"answer\": \"A | B | C | D\",\n"
+        "    \"explanation\": \"Giải thích vì sao từ này phù hợp ngữ cảnh\",\n"
+        "    \"when_wrong\": \"Lỗi chọn sai do hiểu sai ngữ cảnh\"\n"
+        "  }\n"
+        "]\n{% endraw %}\n\n"
+
+        "vocab_list:\n{{ vocab_list }}\n\n"
+        "raw_text:\n{{ raw_text }}"
     )
 )
 
 flashcards_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
+    input_variables=["raw_text", "vocab_list"],
+    template_format="jinja2",
     template=(
-        "Bạn là chuyên gia tạo flashcards SRS cho từ vựng tiếng Anh. Tạo danh sách thẻ CHI TIẾT và THỰC TẾ.\n\n"
-        "FORMAT YÊU CẦU:\n"
-        "- Trả về CHỈ JSON thuần túy (mảng), không có markdown code blocks (```json```)\n"
-        "- Không có text thêm trước hoặc sau JSON\n"
-        "- Đảm bảo tất cả Unicode characters được encode đúng (không có invalid \\u escape sequences)\n"
-        "- Sử dụng double quotes cho strings, escape đúng các ký tự đặc biệt\n\n"
-        "YÊU CẦU QUAN TRỌNG:\n"
-        "- Mỗi flashcard PHẢI có nội dung THỰC TẾ, CỤ THỂ, KHÔNG được dùng placeholder\n"
-        "- Không dùng stopwords (the/and/with...).\n"
-        "- Meaning: nghĩa tiếng Việt CHÍNH XÁC và đầy đủ của từ\n"
-        "- Example: câu ví dụ THỰC TẾ, đúng ngữ pháp, có ngữ cảnh rõ ràng\n"
-        "- Usage_note: hướng dẫn cách dùng CỤ THỂ, lưu ý quan trọng khi dùng từ này\n"
-        "- Synonyms: danh sách từ đồng nghĩa THỰC TẾ (nếu có)\n"
-        "- Antonyms: danh sách từ trái nghĩa THỰC TẾ (nếu có)\n"
-        "- Recall_task: nhiệm vụ gợi nhớ CỤ THỂ để học từ này\n\n"
-        "VÍ DỤ ĐÚNG:\n"
-        "{{\n"
-        '  "word": "decision",\n'
-        '  "front": "decision",\n'
-        '  "back": {{\n'
-        '    "meaning": "quyết định, sự lựa chọn sau khi suy nghĩ kỹ",\n'
-        '    "example": "I made a difficult decision to change my career path",\n'
-        '    "usage_note": "Thường dùng với make/take: make a decision. Không dùng do a decision. Decision thường đi với about/on",\n'
-        '    "synonyms": ["choice", "judgment", "resolution"],\n'
-        '    "antonyms": ["indecision", "hesitation"]\n'
-        '  }},\n'
-        '  "srs_schedule": {{\n'
-        '    "intervals": [1, 3, 7, 14],\n'
-        '    "recall_task": "Nhắc lại nghĩa và đặt câu với make a decision"\n'
-        '  }}\n'
-        "}}\n\n"
-        "VÍ DỤ SAI (KHÔNG ĐƯỢC LÀM):\n"
-        "{{\n"
-        '  "word": "decision",\n'
-        '  "back": {{\n'
-        '    "meaning": "Nghĩa ngắn gọn của decision",\n'
-        '    "example": "Ví dụ: I often practice decision every day",\n'
-        '    "usage_note": "Cách dùng decision trong câu",\n'
-        '    "synonyms": ["decision_syn1", "decision_syn2"],\n'
-        '    "antonyms": ["decision_ant1"]\n'
-        '  }}\n'
-        "}}\n\n"
-        "Schema JSON (mảng):\n"
-        "[\n"
-        '  {{\n'
-        '    "word": "từ vựng",\n'
-        '    "front": "từ cần học",\n'
-        '    "back": {{\n'
-        '      "meaning": "nghĩa tiếng Việt chính xác và đầy đủ",\n'
-        '      "example": "câu ví dụ thực tế, đúng ngữ pháp",\n'
-        '      "usage_note": "hướng dẫn cách dùng cụ thể",\n'
-        '      "synonyms": ["từ đồng nghĩa thực tế"],\n'
-        '      "antonyms": ["từ trái nghĩa thực tế"]\n'
-        '    }},\n'
-        '    "srs_schedule": {{\n'
-        '      "intervals": [1, 3, 7, 14],\n'
-        '      "recall_task": "nhiệm vụ gợi nhớ cụ thể"\n'
-        '    }}\n'
-        '  }}\n'
-        "]\n\n"
-        "vocab_list ưu tiên, nếu trống thì trích từ raw_text.\n\n"
-        "vocab_list:\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
-    )
-)
+        GLOBAL_VOCAB_RULES +
+        "Bạn là AI tạo flashcards SRS học từ vựng.\n\n"
 
-mindmap_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
-    template=(
-        "Bạn là AI chuyên tạo mindmap nhóm từ vựng tiếng Anh. Phân loại và nhóm các từ vựng một cách LOGIC và HỮU ÍCH.\n\n"
-        "FORMAT YÊU CẦU:\n"
-        "- Trả về CHỈ JSON thuần túy, không có markdown code blocks (```json```)\n"
-        "- Không có text thêm trước hoặc sau JSON\n"
-        "- Đảm bảo tất cả Unicode characters được encode đúng (không có invalid \\u escape sequences)\n"
-        "- Sử dụng double quotes cho strings, escape đúng các ký tự đặc biệt\n\n"
-        "YÊU CẦU QUAN TRỌNG:\n"
-        "- Loại bỏ stopwords (the/and/with...). Chỉ dùng danh/động/tính từ nội dung.\n"
-        "- by_topic: Nhóm từ theo CHỦ ĐỀ CỤ THỂ (ví dụ: 'Animals', 'Food', 'Technology'), KHÔNG dùng 'General'.\n"
-        "- by_difficulty: Phân loại theo MỨC ĐỘ THỰC TẾ (easy = từ cơ bản, medium = từ trung bình, hard = từ nâng cao)\n"
-        "- by_pos: Nhóm theo LOẠI TỪ (noun, verb, adjective, adverb)\n"
-        "- by_relation: Nhóm theo QUAN HỆ (synonyms/antonyms/related), KHÔNG dùng 'related_terms' chung chung.\n"
-        "- Description phải CỤ THỂ, giải thích tại sao nhóm này lại có các từ này; tránh mô tả chung chung.\n"
-        "- Ưu tiên dùng vocab_list nếu có, nếu không hãy chọn từ khóa chính trong raw_text\n\n"
-        "VÍ DỤ:\n"
-        "vocab_list: fish, whale, dolphin, decision, choice, option\n"
-        "{{\n"
-        '  "by_topic": [\n'
-        '    {{"topic": "Marine Animals", "description": "Các loài động vật biển", "words": ["fish", "whale", "dolphin"]}},\n'
-        '    {{"topic": "Decision Making", "description": "Từ vựng về quyết định và lựa chọn", "words": ["decision", "choice", "option"]}}\n'
-        '  ],\n'
-        '  "by_difficulty": [\n'
-        '    {{"level": "easy", "description": "Từ cơ bản, thường gặp", "words": ["fish", "choice"]}},\n'
-        '    {{"level": "medium", "description": "Từ trung bình, cần hiểu ngữ cảnh", "words": ["whale", "decision", "option"]}},\n'
-        '    {{"level": "hard", "description": "Từ nâng cao, ít gặp", "words": ["dolphin"]}}\n'
-        '  ],\n'
-        '  "by_pos": [\n'
-        '    {{"pos": "noun", "words": ["fish", "whale", "dolphin", "decision", "choice", "option"]}}\n'
-        '  ],\n'
-        '  "by_relation": [\n'
-        '    {{"group_name": "synonyms", "description": "Từ đồng nghĩa về quyết định", "words": ["decision", "choice", "option"], "clusters": [["decision", "choice"], ["option", "choice"]]}},\n'
-        '    {{"group_name": "related", "description": "Từ liên quan đến động vật biển", "words": ["fish", "whale", "dolphin"]}}\n'
-        '  ]\n'
-        "}}\n\n"
+        "QUAN TRỌNG - SỬ DỤNG CONTEXT:\n"
+        "- raw_text chứa ngữ cảnh thực tế của bài học\n"
+        "- Meaning PHẢI là nghĩa tiếng Việt CHÍNH XÁC (bắt buộc phải dịch, không được để nguyên tiếng Anh)\n"
+        "- Example có thể liên quan đến raw_text nếu phù hợp\n\n"
+
+        "FORMAT:\n"
+        "- Trả về CHỈ JSON (mảng)\n"
+        "- KHÔNG markdown, KHÔNG text thừa\n\n"
+
+        "YÊU CẦU:\n"
+        "- Chỉ bao gồm các từ đồng nghĩa nếu chúng là những từ thông dụng ở trình độ A2–B1.\n"
+        "- Meaning tiếng Việt CHÍNH XÁC (bắt buộc phải dịch, ví dụ: hand = bàn tay, foot = bàn chân)\n"
+        "- Example thực tế, đúng ngữ pháp\n"
+        "- Usage_note cụ thể\n"
+        "- Synonyms / Antonyms thực tế (nếu có)\n"
+        "- Có recall_task\n\n"
+
         "Schema JSON:\n"
-        "{{\n"
-        '  "by_topic": [{{"topic": "chủ đề cụ thể", "description": "mô tả cụ thể", "words": ["từ1","từ2"]}}],\n'
-        '  "by_difficulty": [{{"level": "easy/medium/hard", "description": "mô tả mức độ", "words": ["..."]}}],\n'
-        '  "by_pos": [{{"pos": "noun/verb/adj/adv", "words": ["..."]}}],\n'
-        '  "by_relation": [{{"group_name": "synonyms/antonyms/related", "description": "mô tả quan hệ", "words": ["..."], "clusters": [["từ1", "từ2"]], "pairs": [["từ1", "từ2"]]}}]\n'
-        "}}\n\n"
-        "vocab_list:\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
+        "{% raw %}[\n"
+        "  {\n"
+        "    \"word\": \"từ\",\n"
+        "    \"front\": \"từ\",\n"
+        "    \"back\": {\n"
+        "      \"meaning\": \"nghĩa tiếng Việt\",\n"
+        "      \"example\": \"ví dụ\",\n"
+        "      \"usage_note\": \"cách dùng\",\n"
+        "      \"synonyms\": [],\n"
+        "      \"antonyms\": []\n"
+        "    },\n"
+        "    \"srs_schedule\": {\n"
+        "      \"intervals\": [1,3,7,14],\n"
+        "      \"recall_task\": \"nhiệm vụ gợi nhớ\"\n"
+        "    }\n"
+        "  }\n"
+        "]\n{% endraw %}\n\n"
+
+        "vocab_list:\n{{ vocab_list }}\n\n"
+        "raw_text (ngữ cảnh thực tế):\n{{ raw_text }}"
     )
 )
 
 cloze_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
+    input_variables=["raw_text", "vocab_list"],
+    template_format="jinja2",
     template=(
-        "Bạn là AI tạo bài Cloze Test để luyện từ vựng. Dựa trên vocab_list và raw_text, hãy tạo NHIỀU câu hỏi ĐA DẠNG "
-        "(mỗi câu hỏi là một câu văn độc lập với MỘT chỗ trống duy nhất). "
-        "Mỗi chỗ trống là MỘT từ vựng trong vocab_list. "
-        "Mỗi câu hỏi chỉ có MỘT chỗ trống để dễ điền.\n\n"
-        "FORMAT YÊU CẦU (CỰC KỲ QUAN TRỌNG):\n"
-        "- Trả về CHỈ JSON thuần (mảng), KHÔNG có markdown code blocks (```json``` hoặc ```)\n"
-        "- KHÔNG có text thêm trước hoặc sau JSON (không có giải thích, không có câu nói thêm)\n"
-        "- Bắt đầu response bằng ký tự [ (không có text trước)\n"
-        "- Kết thúc response bằng ký tự ] (không có text sau)\n"
-        "- Mỗi phần tử là một cloze item với trường rõ ràng.\n"
-        "- Mỗi cloze item là một câu hỏi riêng biệt với MỘT chỗ trống duy nhất.\n"
-        "- KHÔNG được thêm bất kỳ text nào ngoài JSON, kể cả câu giải thích hay chú thích\n\n"
-        "YÊU CẦU NỘI DUNG QUAN TRỌNG (BẮT BUỘC):\n"
-        "- BẮT BUỘC: Tất cả các từ trong vocab_list PHẢI được sử dụng làm đáp án cho các chỗ trống (mỗi từ một câu hỏi riêng)\n"
-        "- BẮT BUỘC: Mỗi cloze item chỉ có MỘT chỗ trống duy nhất (dạng ___1___), KHÔNG được tạo nhiều chỗ trống trong một paragraph\n"
-        "- Loại bỏ stopwords (the/and/with...), chỉ dùng từ vựng nội dung từ vocab_list.\n"
-        "- Mỗi câu hỏi phải ĐỘC LẬP, có MỘT chỗ trống duy nhất, dễ hiểu và dễ điền\n"
-        "- Câu văn phải TỰ NHIÊN, đa dạng về ngữ cảnh (học tập, công việc, đời sống, khoa học, nghệ thuật, v.v.)\n"
-        "- Đa dạng về loại câu hỏi:\n"
-        "  + Câu hỏi về nghĩa: \"The word that means 'giảm' is ___.\"\n"
-        "  + Câu điền từ vào ngữ cảnh: \"I need to make a ___ about my future career.\"\n"
-        "  + Câu về collocation: \"We should ___ the price to attract more customers.\"\n"
-        "  + Câu về cách dùng: \"The company decided to ___ its workforce by 10%.\"\n"
-        "- Cung cấp đáp án cho từng blank, giải thích ngắn gọn tại sao đúng, và ví dụ mới khi người học trả lời đúng.\n"
-        "- Không lặp lại nguyên văn raw_text; viết lại súc tích, dễ hiểu, với ngữ cảnh rõ ràng.\n"
-        "- Phân bố đều các từ trong vocab_list, không tập trung một vài từ.\n"
-        "- Mỗi câu hỏi phải có ngữ cảnh đủ để người học có thể đoán được từ cần điền.\n"
-        "- LƯU Ý: Nếu vocab_list có 8 từ, bạn PHẢI tạo 8 câu hỏi riêng biệt, mỗi câu 1 blank, không được gộp nhiều từ vào một paragraph!\n\n"
-        "VÍ DỤ:\n"
-        "vocab_list: decision, reduction, provider, option\n"
-        "[\n"
-        "  {{\n"
-        '    "title": "Making Choices",\n'
-        '    "paragraph": "Sarah had to make a difficult ___1___ about her career path.",\n'
-        '    "blanks": [\n'
-        '      {{"id": 1, "answer": "decision", "explanation": "Decision means a choice made after thinking carefully.", "on_correct_example": "I made a quick decision to accept the job offer."}}\n'
-        '    ]\n'
-        "  }},\n"
-        "  {{\n"
-        '    "title": "Business Strategy",\n'
-        '    "paragraph": "The company announced a 20% ___2___ in staff to reduce costs.",\n'
-        '    "blanks": [\n'
-        '      {{"id": 2, "answer": "reduction", "explanation": "Reduction means making something smaller or less.", "on_correct_example": "There was a significant reduction in pollution levels."}}\n'
-        '    ]\n'
-        "  }},\n"
-        "  {{\n"
-        '    "title": "Service Options",\n'
-        '    "paragraph": "We need to find a reliable internet ___3___ for our office.",\n'
-        '    "blanks": [\n'
-        '      {{"id": 3, "answer": "provider", "explanation": "Provider means a person or company that supplies a service.", "on_correct_example": "The healthcare provider offered excellent service."}}\n'
-        '    ]\n'
-        "  }},\n"
-        "  {{\n"
-        '    "title": "Available Choices",\n'
-        '    "paragraph": "You have three ___4___: stay, leave, or negotiate.",\n'
-        '    "blanks": [\n'
-        '      {{"id": 4, "answer": "option", "explanation": "Option means a choice or possibility.", "on_correct_example": "Studying abroad is a great option for students."}}\n'
-        '    ]\n'
-        "  }}\n"
-        "]\n\n"
-        "Schema JSON (mảng):\n"
-        "[\n"
-        "  {{\n"
-        '    "title": "tiêu đề ngắn gọn cho câu hỏi",\n'
-        '    "paragraph": "Câu văn có MỘT chỗ trống duy nhất dạng ___1___",\n'
-        '    "blanks": [\n'
-        '      {{"id": 1, "answer": "từ_vựng_từ_vocab_list", "explanation": "giải thích ngắn gọn tại sao đúng", "on_correct_example": "câu ví dụ mới dùng đúng từ này"}}\n'
-        '    ]\n'
-        "  }},\n"
-        "  ... (tạo số lượng câu hỏi BẰNG số lượng từ trong vocab_list, mỗi câu 1 chỗ trống, mỗi từ một câu hỏi riêng)\n"
-        "]\n\n"
-        "QUAN TRỌNG:\n"
-        "- vocab_list là DANH SÁCH CÁC TỪ RIÊNG BIỆT, mỗi từ trên một dòng hoặc cách nhau bởi dấu phẩy\n"
-        "- Mỗi câu hỏi chỉ có MỘT chỗ trống để dễ điền\n"
-        "- Tất cả các từ trong vocab_list PHẢI được sử dụng làm đáp án (mỗi từ là một đáp án riêng biệt)\n"
-        "- Mỗi từ trong vocab_list là MỘT TỪ RIÊNG BIỆT, không phải một cụm từ dài\n"
-        "- Câu hỏi phải ĐA DẠNG về ngữ cảnh và loại câu hỏi\n"
-        "- Mỗi câu hỏi phải ĐỘC LẬP và có ngữ cảnh đủ để đoán được từ cần điền\n"
-        "- KHÔNG được coi toàn bộ vocab_list như một từ duy nhất; phải tách từng từ và tạo câu hỏi riêng cho mỗi từ\n\n"
-        "vocab_list (mỗi từ trên một dòng):\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
+        GLOBAL_VOCAB_RULES +
+        "You are an English test writer creating NATURAL cloze test sentences.\n\n"
+
+        "MANDATORY RULES:\n"
+        "- Each vocab item → EXACTLY 2 DIFFERENT cloze sentences:\n"
+        "  (1) type = \"basic_usage\"\n"
+        "  (2) type = \"context_usage\"\n"
+        "- If both sentences are not clearly different in purpose → SKIP vocab.\n\n"
+
+        "BASIC USAGE SENTENCE:\n"
+        "- General, everyday English.\n"
+        "- No specific time, place, or storyline.\n"
+        "- Similar to textbook or grammar exercises.\n\n"
+
+        "CONTEXT USAGE SENTENCE:\n"
+        "- Must include situation, time, reason, or action.\n"
+        "- Clearly linked to raw_text context.\n"
+        "- Similar to exam reading-based cloze questions.\n\n"
+
+        "SENTENCE RULES:\n"
+        "- English only.\n"
+        "- Exactly ONE blank ___1___.\n"
+        "- Sentence must be 100% correct when filled.\n\n"
+
+        "EXPLANATION RULES:\n"
+        "- Vietnamese explanation MUST explain WHY this word fits.\n"
+        "- Mention meaning + usage condition.\n\n"
+
+        "OUTPUT FORMAT:\n"
+        "- JSON ONLY, no markdown.\n\n"
+
+        "Schema JSON:\n"
+        "{% raw %}[\n"
+        "  {\n"
+        "    \"vocab\": \"word\",\n"
+        "    \"type\": \"basic_usage\",\n"
+        "    \"paragraph\": \"English sentence with ___1___\",\n"
+        "    \"blanks\": [{\n"
+        "      \"id\": 1,\n"
+        "      \"answer\": \"word\",\n"
+        "      \"explanation\": \"Giải thích nghĩa và cách dùng cơ bản\",\n"
+        "      \"on_correct_example\": \"Ví dụ tiếng Việt minh họa\"\n"
+        "    }]\n"
+        "  },\n"
+        "  {\n"
+        "    \"vocab\": \"word\",\n"
+        "    \"type\": \"context_usage\",\n"
+        "    \"paragraph\": \"English context sentence with ___1___\",\n"
+        "    \"blanks\": [{\n"
+        "      \"id\": 1,\n"
+        "      \"answer\": \"word\",\n"
+        "      \"explanation\": \"Giải thích dựa trên ngữ cảnh cụ thể\",\n"
+        "      \"on_correct_example\": \"Ví dụ khác cùng tình huống\"\n"
+        "    }]\n"
+        "  }\n"
+        "]\n{% endraw %}\n\n"
+
+        "vocab_list:\n{{ vocab_list }}\n\n"
+        "raw_text:\n{{ raw_text }}"
     )
 )
 
 match_pairs_template = PromptTemplate(
-    input_variables=['raw_text', 'vocab_list'],
+    input_variables=["raw_text", "vocab_list"],
+    template_format="jinja2",
     template=(
-        "Bạn là AI tạo trò chơi nối từ - nghĩa (4x4 gồm 8 cặp). Chọn 8 từ vựng tiêu biểu từ vocab_list (hoặc từ khóa của raw_text nếu thiếu) "
-        "và tạo cặp word-meaning rõ ràng.\n\n"
-        "FORMAT YÊU CẦU (CỰC KỲ QUAN TRỌNG):\n"
-        "- Trả về CHỈ JSON thuần (mảng), KHÔNG có markdown code blocks (```json``` hoặc ```)\n"
-        "- KHÔNG có text thêm trước hoặc sau JSON (không có giải thích, không có câu nói thêm)\n"
-        "- Bắt đầu response bằng ký tự [ (không có text trước)\n"
-        "- Kết thúc response bằng ký tự ] (không có text sau)\n"
-        "- Mỗi phần tử là một cặp từ - nghĩa, kèm gợi ý ngắn.\n"
-        "- KHÔNG được dùng placeholder như 'Ý nghĩa ngắn gọn, thực tế của X' hoặc 'Nghĩa của X'\n"
-        "- Nghĩa phải là NGHĨA THỰC TẾ, CỤ THỂ của từ đó bằng tiếng Việt\n"
-        "- KHÔNG được thêm bất kỳ text nào ngoài JSON, kể cả câu giải thích hay chú thích\n\n"
-        "VÍ DỤ ĐÚNG:\n"
-        "vocab_list: decision, reduction, provider\n"
-        "[\n"
-        '  {{"id": 1, "word": "decision", "meaning": "quyết định", "hint": "hành động chọn lựa"}},\n'
-        '  {{"id": 2, "word": "reduction", "meaning": "sự giảm bớt", "hint": "làm nhỏ hơn"}},\n'
-        '  {{"id": 3, "word": "provider", "meaning": "nhà cung cấp", "hint": "người/đơn vị cung cấp dịch vụ"}}\n'
-        "]\n\n"
-        "VÍ DỤ SAI (KHÔNG ĐƯỢC LÀM):\n"
-        "[\n"
-        '  {{"id": 1, "word": "decision", "meaning": "Ý nghĩa ngắn gọn, thực tế của decision", "hint": "..."}},\n'
-        '  {{"id": 2, "word": "reduction", "meaning": "Nghĩa của reduction", "hint": "..."}}\n'
-        "]\n\n"
-        "Schema JSON (mảng):\n"
-        "[\n"
-        '  {{"id": 1, "word": "từ 1", "meaning": "nghĩa tiếng Việt thực tế (ví dụ: quyết định, giảm bớt, nhà cung cấp)", "hint": "gợi ý ngắn (nếu có)"}},\n'
-        '  {{"id": 2, "word": "từ 2", "meaning": "nghĩa thực tế khác", "hint": "gợi ý ngắn"}},\n'
-        '  ... đến 8 cặp\n'
-        "]\n\n"
-        "YÊU CẦU NỘI DUNG (BẮT BUỘC):\n"
-        "- Nghĩa phải là NGHĨA THỰC TẾ, CỤ THỂ của từ bằng tiếng Việt (ví dụ: 'quyết định', 'giảm bớt', 'nhà cung cấp', 'sò', 'cá voi')\n"
-        "- KHÔNG được dùng placeholder như 'Ý nghĩa của X', 'Nghĩa ngắn gọn của X', 'Meaning of X', 'Ý nghĩa ngắn gọn, thực tế của X'\n"
-        "- Nghĩa phải là TỪ/CỤM TỪ NGẮN GỌN (1-3 từ), không phải câu dài\n"
-        "- Ví dụ ĐÚNG: 'word': 'snail', 'meaning': 'sò' hoặc 'word': 'whale', 'meaning': 'cá voi'\n"
-        "- Ví dụ SAI: 'word': 'snail', 'meaning': 'Ý nghĩa ngắn gọn, thực tế của snail'\n"
-        "- Hint ngắn gọn (tùy chọn) giúp nhớ nhanh\n"
-        "- Không lặp từ; ưu tiên đa dạng loại từ/chủ đề nếu có\n"
-        "- Nếu vocab_list có ít hơn 8 từ, chọn tất cả; nếu nhiều hơn, chọn 8 từ tiêu biểu nhất\n\n"
-        "vocab_list:\n{vocab_list}\n\n"
-        "raw_text:\n{raw_text}\n"
+        GLOBAL_VOCAB_RULES +
+        "Tạo trò chơi nối từ – nghĩa (Các cặp từ vựng - nghĩa tiếng Việt).\n\n"
+
+        "YÊU CẦU NGẮN GỌN:\n"
+        "- Mỗi từ PHẢI xuất hiện chính xác một lần\n"
+        "- Nghĩa KHÔNG ĐƯỢC lặp lại từ tiếng Anh hoặc là cách diễn đạt lại từ đó.\n"
+        "- Nghĩa tiếng Việt ngắn (1–3 từ), chính xác, không placeholder.\n"
+        "- Chỉ dùng từ trong vocab_list.\n"
+        "- Chỉ trả về JSON, không markdown.\n\n"
+
+        "Schema JSON:\n"
+        "{% raw %}[\n"
+        "  {\"id\": 1, \"word\": \"từ\", \"meaning\": \"nghĩa tiếng Việt\", \"hint\": \"gợi ý\"}\n"
+        "]\n{% endraw %}\n\n"
+
+        "vocab_list:\n{{ vocab_list }}\n\n"
+        "raw_text (ngữ cảnh thực tế):\n{{ raw_text }}"
     )
 )
 
@@ -543,61 +421,14 @@ vocab_summary_table_chain = LLMChain(llm=PRIMARY_LLM, prompt=vocab_summary_table
 vocab_story_chain = LLMChain(llm=PRIMARY_LLM, prompt=vocab_story_template)
 vocab_mcq_chain = LLMChain(llm=PRIMARY_LLM, prompt=vocab_mcq_template)
 flashcards_chain = LLMChain(llm=PRIMARY_LLM, prompt=flashcards_template)
-mindmap_chain = LLMChain(llm=PRIMARY_LLM, prompt=mindmap_template)
 cloze_chain = LLMChain(llm=PRIMARY_LLM, prompt=cloze_template)
 match_pairs_chain = LLMChain(llm=PRIMARY_LLM, prompt=match_pairs_template)
 
-_fallback_chains: Dict[str, Optional[LLMChain]] = {
-    'summary': None,
-    'question': None,
-    'mcq': None,
-    'vocab_summary_table': None,
-    'vocab_story': None,
-    'vocab_mcq': None,
-    'flashcards': None,
-    'mindmap': None,
-    'cloze': None,
-    'match_pairs': None,
-}
-
-
-def _get_fallback_chain(name: str) -> Optional[LLMChain]:
-    """Return (and cache) a Gemini-based fallback chain for the given name."""
-    if name not in _fallback_chains:
-        return None
-    if _fallback_chains[name] is not None:
-        return _fallback_chains[name]
-
-    try:
-        fallback_llm = get_gemini_chat_llm(temperature=0.2)
-    except Exception as exc:
-        _fallback_chains[name] = None
-        return None
-
-    if name == 'summary':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=summary_prompt_template)
-    elif name == 'question':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=question_prompt_template)
-    elif name == 'mcq':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=mcq_prompt_template)
-    elif name == 'vocab_summary_table':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=vocab_summary_table_template)
-    elif name == 'vocab_story':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=vocab_story_template)
-    elif name == 'vocab_mcq':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=vocab_mcq_template)
-    elif name == 'flashcards':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=flashcards_template)
-    elif name == 'mindmap':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=mindmap_template)
-    elif name == 'cloze':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=cloze_template)
-    elif name == 'match_pairs':
-        _fallback_chains[name] = LLMChain(llm=fallback_llm, prompt=match_pairs_template)
-    return _fallback_chains[name]
-
+# Patterns để extract JSON từ response
+# Improved pattern để match nested JSON structures tốt hơn
 JSON_BLOCK_PATTERN = re.compile(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', re.S | re.M)
 MARKDOWN_JSON_PATTERN = re.compile(r'```(?:json)?\s*(\{.*?\})\s*```', re.S | re.M)
+# Pattern để match JSON array
 JSON_ARRAY_PATTERN = re.compile(r'\[(?:[^\[\]]|(?:\[[^\[\]]*\]))*\]', re.S | re.M)
 SENTENCE_SPLIT_PATTERN = re.compile(r'(?<=[.!?])\s+')
 
@@ -606,18 +437,47 @@ def _extract_json_block(text: str) -> Optional[str]:
     """
     Extract JSON block từ text response của LLM.
     Hỗ trợ cả markdown code blocks và raw JSON (object hoặc array).
+    Loại bỏ text giải thích trước JSON.
     """
     if not text:
         return None
     
+    # Thử extract từ markdown code block trước
     markdown_match = MARKDOWN_JSON_PATTERN.search(text)
     if markdown_match:
         return markdown_match.group(1)
     
+    # Tìm vị trí của ký tự { đầu tiên (bắt đầu JSON object)
+    first_brace = text.find('{')
+    if first_brace >= 0:
+        # Tìm vị trí của ký tự } cuối cùng tương ứng
+        # Sử dụng stack để tìm } cuối cùng khớp với { đầu tiên
+        brace_count = 0
+        last_brace = -1
+        for i in range(first_brace, len(text)):
+            if text[i] == '{':
+                brace_count += 1
+            elif text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    last_brace = i
+                    break
+        
+        if last_brace > first_brace:
+            json_candidate = text[first_brace:last_brace + 1]
+            # Thử parse để đảm bảo đây là JSON hợp lệ
+            try:
+                json.loads(json_candidate)
+                return json_candidate
+            except json.JSONDecodeError:
+                pass
+    
+    # Thử extract JSON object bằng pattern (fallback)
     match = JSON_BLOCK_PATTERN.search(text)
     if match:
         return match.group()
     
+    # Thử extract JSON array
     array_match = JSON_ARRAY_PATTERN.search(text)
     if array_match:
         return array_match.group()
@@ -635,19 +495,26 @@ def _fix_invalid_unicode_escapes(text: str) -> str:
     def fix_unicode_escape(match):
         """Fix một \\u escape sequence"""
         seq = match.group(0)
+        # Nếu là \uXXXX với đủ 4 hex digits
         if len(seq) == 6:
             hex_part = seq[2:6]
+            # Kiểm tra xem có phải hex hợp lệ không
             try:
                 int(hex_part, 16)
+                # Thử decode để kiểm tra
                 try:
                     seq.encode('utf-8').decode('unicode_escape')
-                    return seq  
+                    return seq  # Hợp lệ, giữ nguyên
                 except (UnicodeDecodeError, ValueError):
+                    # Invalid unicode, thay bằng space
                     return ' '
             except ValueError:
+                # Không phải hex hợp lệ, thay bằng space
                 return ' '
+        # Nếu không đủ 4 hex digits, thay bằng space
         return ' '
     
+    # Fix \u sequences (có thể có 0-4 hex digits)
     text = re.sub(r'\\u[0-9a-fA-F]{0,4}', fix_unicode_escape, text)
     
     return text
@@ -662,38 +529,79 @@ def _safe_json_loads(payload: str, fallback: Any) -> Any:
     if not payload:
         return fallback
     
+    # Thử parse trực tiếp
     try:
         return json.loads(payload.strip())
     except json.JSONDecodeError:
         pass
     
+    # Thử extract JSON block (có thể trong markdown hoặc có text thêm)
     json_block = _extract_json_block(payload)
     if json_block:
+        # Thử parse trực tiếp
         try:
                 return json.loads(json_block)
         except json.JSONDecodeError:
             pass
         
+        # Thử fix invalid escape sequences
         try:
             fixed_block = _fix_invalid_unicode_escapes(json_block)
             return json.loads(fixed_block)
         except json.JSONDecodeError:
             pass
         
+        # Thử decode unicode escapes thủ công
         try:
+            # Thay thế các invalid \u sequences bằng ký tự an toàn
             import re
             def safe_unicode_replace(match):
                 seq = match.group(0)
                 try:
+                    # Thử decode
                     return seq.encode('utf-8').decode('unicode_escape')
                 except:
+                    # Nếu fail, thay bằng space
                     return ' '
             fixed_block = re.sub(r'\\u[0-9a-fA-F]{4}', safe_unicode_replace, json_block)
             return json.loads(fixed_block)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # Log để debug nhưng không raise
             print(f"[summarizer] Extracted block (first 200 chars): {json_block[:200]}")
     
     return fallback
+
+
+# ===== Translation helper =====
+async def translate_text_via_llm(text: str, target_lang: str = "vi") -> str:
+    """
+    Dịch nhanh qua OPENAI_MODEL (gpt-4o-mini). Chỉ trả về nội dung dịch, không giải thích.
+    """
+    if not text:
+        return ""
+    prompt = (
+        "Translate the following text into {target_lang}.\n"
+        "- Keep formatting (newlines, **bold**, lists) intact.\n"
+        "- Do NOT add explanations or pre/suffix.\n\n"
+        "TEXT:\n{text}"
+    ).format(target_lang=target_lang, text=text)
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(None, lambda: TRANSLATE_LLM.invoke(prompt))
+        if hasattr(result, "content"):
+            return result.content.strip()
+        if isinstance(result, str):
+            return result.strip()
+        if isinstance(result, dict):
+            for k in ("content", "text", "output", "result"):
+                val = result.get(k)
+                if isinstance(val, str):
+                    return val.strip()
+            return json.dumps(result, ensure_ascii=False)
+        return str(result)
+    except Exception as exc:
+        print(f"[translate] error: {exc}")
+        return ""
 
 
 def _normalize_word(word: str) -> str:
@@ -794,56 +702,148 @@ async def _run_chain(chain: LLMChain, variables: Dict[str, Any]) -> str:
     """
     Run a LangChain chain và trả về text response.
     Xử lý các exception có thể xảy ra khi invoke chain.
-    """
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(None, lambda: chain.invoke(variables))
-    except Exception as e:
-        error_msg = str(e)
-        if "Missing some input keys" in error_msg:
-            print(f"[summarizer] Chain invoke error (likely malformed LLM response): {error_msg}")
-        raise
     
-    if isinstance(result, str):
-        result_stripped = result.strip()
-        if result_stripped.startswith('{') or result_stripped.startswith('['):
-            return result
-        return result
-    if isinstance(result, dict):
-        for key in ('text', 'output', 'result'):
-            val = result.get(key)
-            if isinstance(val, str):
-                return val
+    Gọi LLM trực tiếp thay vì qua chain để tránh LangChain parse JSON response như template.
+    """
+    # Validate input variables trước khi gọi chain
+    # Đảm bảo tất cả required variables đều có giá trị hợp lệ
+    validated_vars = {}
+    for key, value in variables.items():
+        if value is None:
+            validated_vars[key] = ""
+        elif isinstance(value, str):
+            validated_vars[key] = value.strip()
+        else:
+            validated_vars[key] = value
+    
+    # Log để debug input variables (chỉ log keys và length để tránh log quá dài)
+    var_summary = {k: f"str({len(str(v))})" if isinstance(v, str) else type(v).__name__ for k, v in validated_vars.items()}
+    print(f"[summarizer] _run_chain: Input variables: {var_summary}")
+    
+    loop = asyncio.get_running_loop()
+    
+    # Gọi LLM trực tiếp thay vì qua chain để tránh LangChain parse response như template
+    # Format prompt từ template và gọi LLM trực tiếp
+    try:
+        # Format prompt từ template với validated_vars
+        formatted_prompt = chain.prompt.format(**validated_vars)
+        
+        # Gọi LLM trực tiếp (không qua chain) để tránh LangChain parse response
+        llm = chain.llm
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: llm.invoke(formatted_prompt)),
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+        
+        # Extract text từ LLM response
+        if hasattr(result, 'content'):
+            # ChatMessage response
+            return result.content.strip()
+        elif isinstance(result, str):
+            return result.strip()
+        elif isinstance(result, dict):
+            # Có thể là dict với 'content' hoặc 'text'
+            for key in ('content', 'text', 'output', 'result'):
+                val = result.get(key)
+                if isinstance(val, str):
+                    return val.strip()
+            # As a last resort, stringify
+            try:
+                return json.dumps(result, ensure_ascii=False)
+            except Exception:
+                return str(result)
+        else:
+            return str(result).strip()
+            
+    except asyncio.TimeoutError:
+        print(f"[summarizer] LLM invoke timed out after {LLM_TIMEOUT_SECONDS}s")
+        raise Exception(f"LLM request timed out after {int(LLM_TIMEOUT_SECONDS)} seconds")
+    except Exception as e:
+        # Nếu gọi LLM trực tiếp fail, thử lại với chain.invoke() như fallback
+        error_msg = str(e)
+        print(f"[summarizer] Direct LLM call failed, trying chain.invoke() as fallback: {error_msg[:200]}")
         try:
-            return json.dumps(result, ensure_ascii=False)
-        except Exception:
-            return str(result)
-    return str(result)
+            # Fallback: sử dụng chain.invoke() và extract text từ result
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: chain.invoke(validated_vars)),
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+            # Extract text từ result dict
+            if isinstance(result, dict):
+                for key in ('text', 'output', 'result', 'content'):
+                    val = result.get(key)
+                    if isinstance(val, str):
+                        return val.strip()
+                # As a last resort, stringify
+                try:
+                    return json.dumps(result, ensure_ascii=False)
+                except Exception:
+                    return str(result)
+            elif hasattr(result, 'content'):
+                return result.content.strip()
+            return str(result).strip()
+        except Exception as e2:
+            print(f"[summarizer] Chain.invoke() fallback also failed: {str(e2)[:200]}")
+            raise e  # Raise original error
 
 
 async def _run_chain_with_fallback(chain: LLMChain, name: str, variables: Dict[str, Any]) -> str:
     """
-    Run a chain; if it fails (quota/timeout/etc.), retry once with fallback LLM.
+    Run a chain with OpenAI/MegaLLM (openai-gpt-oss-20b) only.
+    
+    NOTE: Gemini fallback is DISABLED to avoid quota issues and excessive logging.
+    If OpenAI/MegaLLM fails, the exception will be raised directly.
+    
     Catches "Missing some input keys" errors which can occur when LLM response is malformed.
     """
     try:
         return await _run_chain(chain, variables)
     except Exception as primary_exc:
         error_msg = str(primary_exc)
+        
+        # Kiểm tra xem có phải rate limit (429) không
+        is_rate_limit = (
+            "429" in error_msg or 
+            "rate_limit" in error_msg.lower() or 
+            "ResourceExhausted" in error_msg or
+            "quota" in error_msg.lower()
+        )
+        
+        # "Missing some input keys" thường xảy ra khi LLM response không đúng format
+        # hoặc LangChain cố parse response như template
         if "Missing some input keys" in error_msg:
-            print(f"[summarizer] Primary chain '{name}' failed with input keys error, trying fallback: {primary_exc}")
+            print(f"[summarizer] Chain '{name}' failed with input keys error: {error_msg[:200]}")
+        elif is_rate_limit:
+            print(f"[summarizer] Chain '{name}' failed with rate limit (429)")
+        elif "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+            print(f"[summarizer] Chain '{name}' timed out after {LLM_TIMEOUT_SECONDS}s")
         else:
-            print(f"[summarizer] Primary chain '{name}' failed, trying fallback: {primary_exc}")
+            print(f"[summarizer] Chain '{name}' failed: {error_msg[:200]}")
         
-        fallback_chain = _get_fallback_chain(name)
-        if not fallback_chain:
-            raise
+        # No fallback - raise exception directly
+        # To re-enable Gemini fallback, uncomment the code below and comment out the raise
+        raise
         
-        try:
-            return await _run_chain(fallback_chain, variables)
-        except Exception as fallback_exc:
-            print(f"[summarizer] Fallback chain '{name}' also failed: {fallback_exc}")
-            raise
+        # ===== GEMINI FALLBACK (COMMENTED OUT - UNCOMMENT IF NEEDED) =====
+        # fallback_chain = _get_fallback_chain(name)
+        # if not fallback_chain:
+        #     raise
+        #
+        # try:
+        #     return await _run_chain(fallback_chain, variables)
+        # except Exception as fallback_exc:
+        #     fallback_error_msg = str(fallback_exc)
+        #     is_fallback_rate_limit = (
+        #         "429" in fallback_error_msg or 
+        #         "rate_limit" in fallback_error_msg.lower() or 
+        #         "ResourceExhausted" in fallback_error_msg or
+        #         "quota" in fallback_error_msg.lower()
+        #     )
+        #     if is_fallback_rate_limit:
+        #         print(f"[summarizer] Fallback chain '{name}' also failed with rate limit (429)")
+        #     else:
+        #         print(f"[summarizer] Fallback chain '{name}' also failed: {fallback_error_msg[:200]}")
+        #     raise
 
 
 def _build_summary_instructions(
@@ -963,10 +963,43 @@ async def generate_learning_assets(
         'mcqs': mcqs
     }
 
+
+def normalize_vocab_list(vocab_words: List[str]) -> List[str]:
+    """Chuẩn hóa vocab: strip, dedup, sửa lỗi OCR phổ biến."""
+    corrections = {
+        "hammed shark": "hammerhead shark",
+        "hammer shark": "hammerhead shark",
+        "yatch": "yacht",
+    }
+    seen = set()
+    cleaned: List[str] = []
+    for w in vocab_words:
+        if not isinstance(w, str):
+            continue
+        cand = w.strip()
+        if not cand:
+            continue
+        low = cand.lower()
+        if low in corrections:
+            cand = corrections[low]
+            low = cand.lower()
+        if low in seen:
+            continue
+        # loại bỏ stopword đơn chữ
+        if len(cand.split()) == 1 and _is_stopword(cand):
+            continue
+        seen.add(low)
+        cleaned.append(cand)
+    return cleaned[:25]
+
+
+# ===== Vocab checklist helpers =====
+
+
 def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List[str]:
     def filter_phrases(words: List[str]) -> List[str]:
         """
-        Keep each checklist item as-is (phrase), up to 15 unique entries.
+        Keep each checklist item as-is (phrase), up to 25 unique entries.
         Do not split by whitespace; only trim and deduplicate (case-insensitive).
         """
         seen = set()
@@ -975,14 +1008,19 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
             phrase = (w or "").strip()
             if not phrase:
                 continue
-            if len(phrase.split()) == 1 and _is_stopword(_normalize_word(phrase)):
-                continue
+            # Loại bỏ stopwords nếu phrase chỉ là một từ (NHƯNG chỉ filter nếu phrase thực sự là stopword đơn giản)
+            # Không filter các từ có ý nghĩa như "whale", "shark" dù có thể ngắn
+            if len(phrase.split()) == 1:
+                normalized_phrase = _normalize_word(phrase)
+                # Chỉ filter nếu thực sự là stopword và từ quá ngắn (< 3 ký tự)
+                if normalized_phrase in STOPWORDS or (len(normalized_phrase) < 3 and normalized_phrase in STOPWORDS):
+                    continue
             key = phrase.lower()
             if key in seen:
                 continue
             seen.add(key)
             filtered.append(phrase)
-            if len(filtered) >= 15:
+            if len(filtered) >= 25:
                 break
         return filtered
 
@@ -1000,12 +1038,13 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
                 continue
             seen.add(norm)
             filtered.append(norm)
-            if len(filtered) >= 15:
+            if len(filtered) >= 25:
                 break
         return filtered
 
     vocab_words: List[str] = []
     if checked_vocab_items:
+        # Prefer explicit items from client (one vocab per checklist item)
         try:
             parsed = json.loads(checked_vocab_items)
             if isinstance(parsed, list):
@@ -1013,24 +1052,29 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
         except Exception:
             vocab_words = []
 
+        # If not JSON or empty, parse as comma/semicolon/newline separated items
         if not vocab_words:
             candidates = []
+            # Split by newline, semicolon, or comma
             separator_found = False
             for separator in ["\n", ";", ","]:
                 if separator in checked_vocab_items:
                     for item in checked_vocab_items.split(separator):
                         cand = item.strip()
-                if cand:
-                    candidates.append(cand)
+                        if cand:
+                            candidates.append(cand)
                     separator_found = True
                     break
             
             if not separator_found:
+                # No separator found, treat as single item
                 cand = checked_vocab_items.strip()
                 if cand:
                     candidates.append(cand)
             
             vocab_words = filter_phrases(candidates)
+    
+    # Fallback: extract from raw_text if no checked_vocab_items
     if not vocab_words:
         tokens = [w.strip(" ,.;:()[]{}\"'") for w in raw_text.split()]
         vocab_words = filter_words(tokens)
@@ -1038,15 +1082,20 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
     if not vocab_words:
         vocab_words = ["vocabulary"]
     
+    # Debug log để kiểm tra
     print(f"[vocab_parse] Parsed vocab_words: {vocab_words}")
     return vocab_words
 
 
 async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
+    # Validate và prepare input variables
+    vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
+        "raw_text": raw_text or "",
+        "vocab_list": vocab_list_str,
     }
+    # Log để debug input variables
+    print(f"[summarizer] _generate_vocab_summary_table: raw_text length={len(raw_text)}, vocab_list count={len(vocab_list)}, vocab_list_str length={len(vocab_list_str)}")
     try:
         response = await _run_chain_with_fallback(vocab_summary_table_chain, 'vocab_summary_table', payload)
         parsed = _safe_json_loads(response, None)
@@ -1063,6 +1112,7 @@ async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) ->
                     continue
                 collocations = item.get('collocations')
                 if isinstance(collocations, list):
+                    # dedup collocations
                     seen = set()
                     item['collocations'] = [c for c in collocations if not (c in seen or seen.add(c))]
                 valid_items.append(item)
@@ -1074,13 +1124,25 @@ async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) ->
 
 
 async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[Dict[str, Any]]:
+    # Đảm bảo vocab_list không rỗng và có ít nhất một vài từ
+    if not vocab_list:
+        print(f"[summarizer] Vocab story: vocab_list is empty, cannot generate story")
+        return None
+    
+    # Log vocab_list để debug
+    print(f"[summarizer] Vocab story: vocab_list has {len(vocab_list)} words: {vocab_list[:4]}...")
+    
+    # Validate và prepare input variables
+    vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
+        "raw_text": raw_text or "",
+        "vocab_list": vocab_list_str,
     }
+    print(f"[summarizer] _generate_vocab_story: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     max_retries = 2
     try:
         response = await _run_chain_with_fallback(vocab_story_chain, 'vocab_story', payload)
+        # Log response để debug
         if response and len(response) > 500:
             print(f"[summarizer] Vocab story response (first 500 chars): {response[:500]}")
         else:
@@ -1090,18 +1152,24 @@ async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_coun
         if isinstance(parsed, dict) and parsed.get('title') and parsed.get('paragraphs'):
             paragraphs = parsed.get('paragraphs', [])
             print(f"[summarizer] Vocab story received {len(paragraphs) if isinstance(paragraphs, list) else 0} paragraphs")
-            if isinstance(paragraphs, list) and len(paragraphs) >= 5:
+            # Yêu cầu tối thiểu: Phải có ít nhất 4 đoạn hợp lệ (theo prompt yêu cầu)
+            if isinstance(paragraphs, list) and len(paragraphs) >= 4:
+                # Kiểm tra độ dài mỗi đoạn (tối thiểu 1 câu, khuyến nghị 2 câu)
                 valid_paragraphs = []
                 for idx, para in enumerate(paragraphs):
                     if isinstance(para, str) and para.strip():
-                        sentences = [s.strip() for s in para.split('.') if s.strip()]
-                        if len(sentences) >= 2: 
+                        # Đếm số câu (dựa vào dấu chấm, dấu chấm hỏi, dấu chấm than)
+                        import re
+                        sentence_endings = re.split(r'[.!?]+', para)
+                        sentences = [s.strip() for s in sentence_endings if s.strip() and len(s.strip()) > 4]
+                        if len(sentences) >= 1:  # Tối thiểu 1 câu mỗi đoạn
                             valid_paragraphs.append(para)
                         else:
-                            print(f"[summarizer] Paragraph {idx+1} rejected: only {len(sentences)} sentences (required: 2+)")
+                            print(f"[summarizer] Paragraph {idx+1} rejected: only {len(sentences)} sentences (required: 1+)")
                 
                 print(f"[summarizer] Vocab story has {len(valid_paragraphs)} valid paragraphs")
-                if len(valid_paragraphs) >= 5:
+                # Chấp nhận story nếu có ít nhất 4 đoạn hợp lệ (theo yêu cầu prompt)
+                if len(valid_paragraphs) >= 4:
                     parsed['paragraphs'] = valid_paragraphs
                     used_words = parsed.get('used_words') or []
                     cleaned_used = [uw for uw in used_words if isinstance(uw, dict) and not _is_stopword(uw.get('word'))]
@@ -1109,10 +1177,12 @@ async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_coun
                     print(f"[summarizer] Vocab story accepted with {len(valid_paragraphs)} paragraphs")
                     return parsed
                 else:
-                    print(f"[summarizer] Vocab story rejected: only {len(valid_paragraphs)} valid paragraphs (required: 5+)")
+                    print(f"[summarizer] Vocab story rejected: no valid paragraphs (all paragraphs were too short)")
             else:
-                print(f"[summarizer] Vocab story rejected: only {len(paragraphs) if isinstance(paragraphs, list) else 0} paragraphs (required: 5+)")
-
+                # Nếu paragraphs không phải list hoặc rỗng, reject
+                print(f"[summarizer] Vocab story rejected: invalid paragraphs format (expected list, got {type(paragraphs).__name__}) or empty")
+            
+            # Retry nếu chưa đạt yêu cầu
             if retry_count < max_retries:
                 print(f"[summarizer] Retrying vocab story generation (attempt {retry_count + 1}/{max_retries})")
                 return await _generate_vocab_story(raw_text, vocab_list, retry_count + 1)
@@ -1123,43 +1193,133 @@ async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_coun
                 return await _generate_vocab_story(raw_text, vocab_list, retry_count + 1)
     except Exception as exc:
         print(f"[summarizer] Error generating vocab story: {exc}")
-        if retry_count < max_retries:
+        error_msg = str(exc)
+        is_rate_limit = (
+            "429" in error_msg or 
+            "rate_limit" in error_msg.lower() or 
+            "ResourceExhausted" in error_msg or
+            "quota" in error_msg.lower()
+        )
+        # Không retry nếu là rate limit (sẽ dùng fallback thay vì retry)
+        if retry_count < max_retries and not is_rate_limit:
             print(f"[summarizer] Retrying vocab story generation after error (attempt {retry_count + 1}/{max_retries})")
             return await _generate_vocab_story(raw_text, vocab_list, retry_count + 1)
     return None
 
 
 async def _generate_vocab_mcqs(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
-    payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
-    }
-    try:
-        response = await _run_chain_with_fallback(vocab_mcq_chain, 'vocab_mcq', payload)
-        parsed = _safe_json_loads(response, None)
-        if isinstance(parsed, list) and len(parsed) > 0:
-            valid_items = []
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                if not item.get('question') or not item.get('options'):
-                    continue
-                target = item.get('vocab_target') or ""
-                if _is_stopword(target):
-                    continue
-                valid_items.append(item)
-            if valid_items:
-                return valid_items
-    except Exception as exc:
-        print(f"[summarizer] Error generating vocab MCQs: {exc}")
-    return None
+    """
+    Generate vocab MCQs in chunks to avoid long single-call latency/timeouts.
+    For each vocab word: require 2 questions (meaning + context).
+    Also force numeric `id` to avoid client-side NumberFormatException (Android/Java).
+    """
+    if not vocab_list:
+        return None
+
+    def _norm_key(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+    def _chunk_list(items: List[str], chunk_size: int) -> List[List[str]]:
+        return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+    # Keep raw_text bounded to reduce token usage and avoid timeouts in large combined notes
+    raw_text_for_prompt = (raw_text or "")[:2000]
+
+    chunk_size = 6  # target 5–7; using 6 as default
+    chunks = _chunk_list(vocab_list, chunk_size)
+    print(
+        f"[summarizer] _generate_vocab_mcqs: raw_text length={len(raw_text_for_prompt)}, "
+        f"vocab_list count={len(vocab_list)}, chunks={len(chunks)}, chunk_size={chunk_size}"
+    )
+
+    sem = asyncio.Semaphore(2)  # limit concurrency to avoid overwhelming the LLM
+
+    async def _run_chunk(chunk_words: List[str], chunk_idx: int) -> List[Dict[str, Any]]:
+        async with sem:
+            vocab_list_str = "\n".join(chunk_words)
+            payload = {
+                "raw_text": raw_text_for_prompt,
+                "vocab_list": vocab_list_str,
+            }
+            print(
+                f"[summarizer] vocab_mcq chunk {chunk_idx + 1}/{len(chunks)}: "
+                f"vocab_count={len(chunk_words)}, vocab_list_str length={len(vocab_list_str)}"
+            )
+            try:
+                response = await _run_chain_with_fallback(vocab_mcq_chain, "vocab_mcq", payload)
+                parsed = _safe_json_loads(response, None)
+                if not isinstance(parsed, list) or not parsed:
+                    return []
+
+                # Basic validation
+                candidates: List[Dict[str, Any]] = []
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    if not item.get("question") or not item.get("options"):
+                        continue
+                    qtype = (item.get("question_type") or "").strip().lower()
+                    if qtype not in ("meaning", "context"):
+                        continue
+                    target = item.get("vocab_target") or ""
+                    if _is_stopword(target):
+                        continue
+                    candidates.append(item)
+
+                if not candidates:
+                    return []
+
+                # Enforce 2 questions per vocab_target (meaning + context)
+                grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                for item in candidates:
+                    target_key = _norm_key(item.get("vocab_target") or "")
+                    qtype = (item.get("question_type") or "").strip().lower()
+                    grouped.setdefault(target_key, {})[qtype] = item
+
+                out: List[Dict[str, Any]] = []
+                for w in chunk_words:
+                    key = _norm_key(w)
+                    pair = grouped.get(key) or {}
+                    if "meaning" in pair and "context" in pair:
+                        # Keep stable order: meaning then context
+                        out.append(pair["meaning"])
+                        out.append(pair["context"])
+                return out
+            except Exception as exc:
+                print(f"[summarizer] Error generating vocab MCQs chunk {chunk_idx + 1}: {exc}")
+                return []
+
+    # Run chunks (bounded concurrency) then merge
+    chunk_results = await asyncio.gather(*[_run_chunk(c, i) for i, c in enumerate(chunks)])
+    merged: List[Dict[str, Any]] = [item for sub in chunk_results for item in sub if isinstance(item, dict)]
+
+    if not merged:
+        return None
+
+    # Final normalization: numeric id + stable uid
+    for idx, item in enumerate(merged, start=1):
+        qtype = (item.get("question_type") or "meaning").strip().lower()
+        target = (item.get("vocab_target") or "").strip()
+        original_id = item.get("id")
+        # Preserve original id as uid if it's useful, otherwise create one from target+type
+        if original_id is not None:
+            item["uid"] = str(original_id)
+        else:
+            item["uid"] = f"{target}_{qtype}".strip()
+        item["id"] = idx
+
+    print(f"[summarizer] Vocab MCQs merged: {len(merged)} questions (expected up to {len(vocab_list) * 2})")
+    return merged
 
 
 async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[List[Dict[str, Any]]]:
+    # Validate và prepare input variables
+    vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
+        "raw_text": raw_text or "",
+        "vocab_list": vocab_list_str,
     }
+    print(f"[summarizer] _generate_cloze_tests: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     max_retries = 2
     try:
         response = await _run_chain_with_fallback(cloze_chain, 'cloze', payload)
@@ -1174,6 +1334,12 @@ async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_coun
                     continue
                 if "This is a ___" in paragraph:
                     continue
+                # Đếm số lượng blanks trong paragraph text (___1___, ___2___, etc.)
+                import re
+                blank_count_in_text = len(re.findall(r'___\d+___', paragraph))
+                if blank_count_in_text != 1:
+                    print(f"[summarizer] Cloze test rejected: paragraph has {blank_count_in_text} blanks in text (required: exactly 1 blank per paragraph)")
+                    continue
                 if not item.get('blanks'):
                     continue
                 blanks = item.get('blanks')
@@ -1186,16 +1352,20 @@ async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_coun
                         if _is_stopword(ans):
                             continue
                         cleaned_blanks.append(b)
+                    # BẮT BUỘC: Mỗi câu hỏi chỉ có 1 blank (format mới)
                     if cleaned_blanks and len(cleaned_blanks) == 1:
                         item['blanks'] = cleaned_blanks
                         valid_items.append(item)
                     else:
-                        print(f"[summarizer] Cloze test rejected: {len(cleaned_blanks)} blanks in one question (required: 1 blank per question)")
-            min_required = min(len(vocab_list), 3) 
+                        # Reject format cũ (nhiều blanks trong một paragraph)
+                        print(f"[summarizer] Cloze test rejected: {len(cleaned_blanks)} blanks in blanks array (required: 1 blank per question)")
+            # Yêu cầu: Tất cả các từ trong vocab_list phải có câu hỏi riêng (mỗi từ một câu hỏi)
+            min_required = min(len(vocab_list), 3)  # Tối thiểu 3 câu hỏi
             if valid_items and len(valid_items) >= min_required:
                 return valid_items
             else:
                 print(f"[summarizer] Cloze test rejected: only {len(valid_items)} questions (required: {min_required}+)")
+                # Retry nếu chưa đạt yêu cầu
                 if retry_count < max_retries:
                     print(f"[summarizer] Retrying cloze test generation (attempt {retry_count + 1}/{max_retries})")
                     return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1)
@@ -1205,17 +1375,28 @@ async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_coun
                 return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1)
     except Exception as exc:
         print(f"[summarizer] Error generating cloze tests: {exc}")
-        if retry_count < max_retries:
+        error_msg = str(exc)
+        is_rate_limit = (
+            "429" in error_msg or 
+            "rate_limit" in error_msg.lower() or 
+            "ResourceExhausted" in error_msg or
+            "quota" in error_msg.lower()
+        )
+        # Không retry nếu là rate limit (sẽ dùng fallback thay vì retry)
+        if retry_count < max_retries and not is_rate_limit:
             print(f"[summarizer] Retrying cloze test generation after error (attempt {retry_count + 1}/{max_retries})")
             return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1)
     return None
 
 
 async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[List[Dict[str, Any]]]:
+    # Validate và prepare input variables
+    vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
+        "raw_text": raw_text or "",
+        "vocab_list": vocab_list_str,
     }
+    print(f"[summarizer] _generate_match_pairs: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     max_retries = 2
     try:
         response = await _run_chain_with_fallback(match_pairs_chain, 'match_pairs', payload)
@@ -1228,7 +1409,8 @@ async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_coun
                 word = item.get('word')
                 if _is_stopword(word):
                     continue
-                meaning = item.get('meaning') or ""     
+                meaning = item.get('meaning') or ""
+                # Reject các placeholder và nghĩa không cụ thể
                 meaning_lower = meaning.lower()
                 placeholder_patterns = [
                     "nghĩa của", "nghĩa ngắn gọn", "ý nghĩa ngắn gọn", 
@@ -1241,21 +1423,15 @@ async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_coun
                 if not meaning.strip() or len(meaning.strip()) < 2:
                     print(f"[summarizer] Match pairs rejected: empty or too short meaning '{meaning}' for word '{word}'")
                     continue
-                if len(meaning.strip()) > 50:  
+                # Nghĩa phải là từ/cụm từ cụ thể, không phải câu dài
+                if len(meaning.strip()) > 50:  # Nghĩa quá dài có thể là placeholder
                     print(f"[summarizer] Match pairs rejected: meaning too long '{meaning}' for word '{word}'")
                     continue
                 valid_items.append(item)
             if valid_items:
-                if len(valid_items) >= 8:
-                    return valid_items[:8]
-                elif len(valid_items) >= 4: 
-                    return valid_items
-                else:
-                    print(f"[summarizer] Match pairs rejected: only {len(valid_items)} valid pairs (required: 4+)")
-                    if retry_count < max_retries:
-                        print(f"[summarizer] Retrying match pairs generation (attempt {retry_count + 1}/{max_retries})")
-                        return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
+                return valid_items  # giữ tất cả cặp hợp lệ để hiển thị/ luyện nhiều vòng
             else:
+                print(f"[summarizer] Match pairs rejected: 0 valid pairs")
                 if retry_count < max_retries:
                     print(f"[summarizer] Retrying match pairs generation (attempt {retry_count + 1}/{max_retries})")
                     return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
@@ -1265,17 +1441,28 @@ async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_coun
                 return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
     except Exception as exc:
         print(f"[summarizer] Error generating match pairs: {exc}")
-        if retry_count < max_retries:
+        error_msg = str(exc)
+        is_rate_limit = (
+            "429" in error_msg or 
+            "rate_limit" in error_msg.lower() or 
+            "ResourceExhausted" in error_msg or
+            "quota" in error_msg.lower()
+        )
+        # Không retry nếu là rate limit (sẽ dùng fallback thay vì retry)
+        if retry_count < max_retries and not is_rate_limit:
             print(f"[summarizer] Retrying match pairs generation after error (attempt {retry_count + 1}/{max_retries})")
             return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
     return None
 
 
 async def _generate_flashcards(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
+    # Validate và prepare input variables
+    vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
+        "raw_text": raw_text or "",
+        "vocab_list": vocab_list_str,
     }
+    print(f"[summarizer] _generate_flashcards: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     try:
         response = await _run_chain_with_fallback(flashcards_chain, 'flashcards', payload)
         parsed = _safe_json_loads(response, None)
@@ -1296,175 +1483,20 @@ async def _generate_flashcards(raw_text: str, vocab_list: List[str]) -> Optional
 
 
 async def _generate_mindmap(raw_text: str, vocab_list: List[str]) -> Optional[Dict[str, Any]]:
-    payload = {
-        "raw_text": raw_text,
-        "vocab_list": "\n".join(vocab_list),
-    }
-    try:
-        response = await _run_chain_with_fallback(mindmap_chain, 'mindmap', payload)
-        parsed = _safe_json_loads(response, None)
-        if isinstance(parsed, dict):
-            def clean_words(words):
-                if not isinstance(words, list):
-                    return []
-                seen = set()
-                out = []
-                for w in words:
-                    if _is_stopword(w):
-                        continue
-                    if w in seen:
-                        continue
-                    seen.add(w)
-                    out.append(w)
-                return out
-
-            for key in ('by_topic', 'by_difficulty', 'by_pos', 'by_relation'):
-                groups = parsed.get(key)
-                if isinstance(groups, list):
-                    cleaned_groups = []
-                    for g in groups:
-                        if not isinstance(g, dict):
-                            continue
-                        name_fields = [g.get('topic'), g.get('group_name'), g.get('description')]
-                        if any(str(v).lower() == 'general' or str(v).lower() == 'related_terms' for v in name_fields if v):
-                            continue
-                        g_words = clean_words(g.get('words'))
-                        g['words'] = g_words
-                        if g_words:
-                            cleaned_groups.append(g)
-                    parsed[key] = cleaned_groups
-            if any(parsed.get(k) for k in ('by_topic', 'by_difficulty', 'by_pos', 'by_relation')):
-                return parsed
-    except Exception as exc:
-        print(f"[summarizer] Error generating mindmap: {exc}")
+    # Mindmap đã tắt: luôn trả None để dùng fallback
     return None
 
 
 def _fallback_vocab_bundle(vocab_words: List[str]) -> Dict[str, Any]:
-    def pick_words(n):
-        return vocab_words[:n] if len(vocab_words) >= n else vocab_words
-
-    summary_table = []
-    for w in vocab_words[:15]:
-        summary_table.append({
-            "word": w,
-            "translation": f"{w} (nghĩa tiếng Việt cụ thể)",
-            "part_of_speech": "noun",
-            "definition": f"Short definition of {w} in English (1 sentence).",
-            "usage_note": f"Cách dùng {w} trong ngữ cảnh quen thuộc.",
-            "common_structures": [f"use {w} to ...", f"{w} + noun"],
-            "collocations": [f"{w} example", f"{w} phrase"],
-        })
-
-    story_paragraphs = []
-    words = pick_words(min(10, len(vocab_words)))
-    for i in range(5):
-        if i < len(words):
-            story_paragraphs.append(
-                f"In this story, we explore the concept of **{words[i]}**. "
-                f"This word plays an important role in understanding the context. "
-                f"Let us see how **{words[i]}** is used in different situations."
-            )
-        else:
-            word = words[i % len(words)] if words else "vocabulary"
-            story_paragraphs.append(
-                f"Continuing our exploration, we find that **{word}** appears again. "
-                f"This repetition helps us remember the word better. "
-                f"Understanding **{word}** is key to mastering this vocabulary set."
-            )
-
-    story = {
-        "title": "Ghi nhớ từ vựng",
-        "paragraphs": story_paragraphs,
-        "used_words": [{"word": w, "bolded": True} for w in words],
-    }
-
-    mcqs = []
-    for i, w in enumerate(pick_words(7), start=1):
-        mcqs.append({
-            "id": i,
-            "type": "vocab_mcq",
-            "vocab_target": w,
-            "question": f"What does '{w}' mean in context?",
-            "options": {
-                "A": f"The correct meaning of {w}",
-                "B": f"A close but wrong meaning of {w}",
-                "C": f"An unrelated meaning",
-                "D": f"A random option",
-            },
-            "answer": "A",
-            "explanation": f"{w} means the definition in A.",
-        })
-
-    flashcards = []
-    for w in pick_words(10):
-        flashcards.append({
-            "word": w,
-            "front": w,
-            "back": {
-                "meaning": f"Meaning of {w} (concise, real).",
-                "example": f"A natural example using {w}.",
-                "usage_note": f"Usage note for {w}.",
-                "synonyms": [f"{w}_syn1"],
-                "antonyms": [],
-            },
-            "srs_schedule": {
-                "intervals": [1, 3, 7],
-                "recall_task": f"Recall {w} meaning and make a sentence.",
-            },
-        })
-
-    mindmap = {
-        "by_topic": [{"topic": "Context", "description": "Một nhóm theo ngữ cảnh", "words": pick_words(6)}],
-        "by_difficulty": [{"level": "easy", "description": "Cơ bản", "words": pick_words(5)}],
-        "by_pos": [{"pos": "noun", "words": pick_words(8)}],
-        "by_relation": [{"group_name": "related", "description": "Từ liên quan", "words": pick_words(6)}],
-    }
-
-    cloze = []
-    words_for_cloze = pick_words(min(8, len(vocab_words)))
-    for idx, word in enumerate(words_for_cloze, start=1):
-        cloze.append({
-            "title": f"Vocabulary Practice {idx}",
-            "paragraph": f"Fill in the blank: The word '{word}' means ___{idx}___ in this context.",
-            "blanks": [
-                {"id": idx, "answer": word, "explanation": f"The correct answer is '{word}'.", "on_correct_example": f"Example: I saw a {word} at the beach."}
-            ],
-        })
-
-    match_pairs = []
-    words_for_pairs = pick_words(min(8, len(vocab_words)))
-    simple_meanings = {
-        "whale": "cá voi",
-        "shark": "cá mập", 
-        "shrimp": "tôm",
-        "squid": "mực",
-        "crab": "cua",
-        "snail": "ốc sên",
-        "dolphin": "cá heo",
-        "fish": "cá",
-        "ocean": "đại dương",
-        "sea": "biển",
-        "sand": "cát",
-        "rock": "đá"
-    }
-    for idx, w in enumerate(words_for_pairs, start=1):
-        meaning = simple_meanings.get(w.lower(), w)
-        match_pairs.append({
-            "id": idx,
-            "word": w,
-            "meaning": meaning,
-            "hint": f"Gợi ý ngắn cho {w}"
-        })
-
+    # Không tự gen fallback nội dung để tránh sai lệch; trả về trống an toàn.
     return {
-        "summary_table": summary_table,
-        "vocab_story": story,
-        "vocab_mcqs": mcqs,
-        "flashcards": flashcards,
-        "mindmap": mindmap,
-        "cloze_tests": cloze,
-        "match_pairs": match_pairs,
+        "summary_table": [],
+        "vocab_story": None,
+        "vocab_mcqs": [],
+        "flashcards": [],
+        "mindmap": None,
+        "cloze_tests": [],
+        "match_pairs": [],
     }
 
 
@@ -1472,67 +1504,234 @@ async def generate_vocab_bundle(
     raw_text: str,
     checked_vocab_items: Optional[str] = None,
 ) -> Dict[str, Any]:
-    vocab_words = _parse_vocab_list(raw_text, checked_vocab_items)
+    vocab_words = normalize_vocab_list(_parse_vocab_list(raw_text, checked_vocab_items))
 
-    summary_table, story, mcqs, flashcards, mindmap, cloze, match_pairs = await asyncio.gather(
+    # Generate all vocab features in parallel
+    summary_table, story, mcqs, flashcards, cloze, match_pairs = await asyncio.gather(
         _generate_vocab_summary_table(raw_text, vocab_words),
         _generate_vocab_story(raw_text, vocab_words),
         _generate_vocab_mcqs(raw_text, vocab_words),
         _generate_flashcards(raw_text, vocab_words),
-        _generate_mindmap(raw_text, vocab_words),
         _generate_cloze_tests(raw_text, vocab_words),
         _generate_match_pairs(raw_text, vocab_words),
     )
 
+    # Get fallback bundle để fill các phần fail
     fallback = _fallback_vocab_bundle(vocab_words)
 
+    # Post-processing và validation cuối cùng: vocab_story
+    # Chấp nhận bất kỳ số đoạn >0, chỉ lọc đoạn rỗng; không reject để tránh mất story.
     if story:
         story_paras = story.get('paragraphs', [])
-        if not isinstance(story_paras, list) or len(story_paras) < 5:
-            print(f"[summarizer] Final validation: vocab_story rejected ({len(story_paras) if isinstance(story_paras, list) else 0} paragraphs), using fallback")
+        if isinstance(story_paras, list):
+            processed_paras = [p.strip() for p in story_paras if isinstance(p, str) and p.strip()]
+            if processed_paras:
+                story['paragraphs'] = processed_paras
+                print(f"[summarizer] Final validation: vocab_story kept with {len(processed_paras)} paragraphs (very relaxed)")
+            else:
+                print(f"[summarizer] Final validation: vocab_story rejected (no usable paragraphs), using fallback")
+                story = None
+        else:
+            print(f"[summarizer] Final validation: vocab_story rejected (invalid paragraphs type), using fallback")
             story = None
     
+    # Cloze Tests: mỗi câu hỏi chỉ có 1 blank - POST-PROCESS để tách các blanks thành câu hỏi riêng
+    safe_cloze_templates = {
+        "have lunch": {
+            "title": "Bữa trưa",
+            "paragraph": "Tôi thường ăn ___1___ vào khoảng 12 giờ trưa.",
+            "explanation": "Dùng 'have lunch' cho bữa trưa.",
+            "example": "Chúng tôi thường ăn bữa trưa (have lunch) cùng đồng nghiệp."
+        },
+        "run": {
+            "title": "Chạy bộ",
+            "paragraph": "Mỗi sáng tôi ___1___ quanh công viên để khỏe mạnh.",
+            "explanation": "Dùng 'run' cho hành động chạy.",
+            "example": "Tôi thích chạy bộ (run) vào cuối tuần."
+        },
+        "walk": {
+            "title": "Đi bộ",
+            "paragraph": "Sau bữa tối, tôi thường ___1___ quanh khu phố.",
+            "explanation": "Dùng 'walk' cho hành động đi bộ.",
+            "example": "Chúng tôi đi bộ (walk) cùng nhau vào chiều mát."
+        },
+        "eat snack": {
+            "title": "Ăn nhẹ",
+            "paragraph": "Khi thấy đói giữa buổi, tôi sẽ ___1___ để nạp năng lượng.",
+            "explanation": "Dùng 'eat snack' cho ăn nhẹ.",
+            "example": "Tôi thích ăn nhẹ (eat snack) khi xem phim."
+        },
+        "drink water": {
+            "title": "Uống nước",
+            "paragraph": "Trong ngày, tôi luôn nhớ ___1___ để giữ sức khỏe.",
+            "explanation": "Dùng 'drink water' cho hành động uống nước.",
+            "example": "Bạn nên uống nước (drink water) đủ mỗi ngày."
+        },
+    }
     if cloze:
         valid_cloze = []
+        import re
         for item in cloze:
-            if isinstance(item, dict):
-                blanks = item.get('blanks', [])
-                if isinstance(blanks, list) and len(blanks) == 1:
-                    valid_cloze.append(item)
-                else:
-                    print(f"[summarizer] Final validation: cloze item rejected ({len(blanks) if isinstance(blanks, list) else 0} blanks)")
+            if not isinstance(item, dict):
+                continue
+            paragraph = item.get('paragraph', '')
+            blanks = item.get('blanks', [])
+            
+            if not isinstance(blanks, list) or not blanks:
+                continue
+            
+            # Đếm số blanks trong paragraph text
+            blank_count_in_text = len(re.findall(r'___\d+___', paragraph))
+            
+            if blank_count_in_text == 1 and len(blanks) == 1:
+                # Đúng format: 1 blank trong text và 1 blank trong array
+                valid_cloze.append(item)
+            elif blank_count_in_text > 1 or len(blanks) > 1:
+                # POST-PROCESS: Tách thành nhiều câu hỏi riêng biệt
+                print(f"[summarizer] Post-processing cloze: splitting {blank_count_in_text} blanks into separate questions")
+                for idx, blank in enumerate(blanks):
+                    if not isinstance(blank, dict):
+                        continue
+                    blank_id = blank.get('id', idx + 1)
+                    blank_answer = blank.get('answer', '')
+                    
+                    # Tạo paragraph mới chỉ với 1 blank bằng cách thay thế các blanks khác bằng từ gốc
+                    new_paragraph = paragraph
+                    # Tìm tất cả các blanks trong paragraph
+                    all_blank_matches = re.finditer(r'___(\d+)___', paragraph)
+                    for match in all_blank_matches:
+                        match_id = int(match.group(1))
+                        if match_id != blank_id:
+                            # Thay thế blank này bằng từ gốc từ answer của blank tương ứng
+                            other_blank = next((b for b in blanks if b.get('id') == match_id), None)
+                            replacement = other_blank.get('answer', '') if other_blank else ''
+                            if replacement:
+                                new_paragraph = new_paragraph.replace(f"___{match_id}___", replacement)
+                    
+                    # Đảm bảo chỉ còn 1 blank trong paragraph mới
+                    remaining_blanks = len(re.findall(r'___\d+___', new_paragraph))
+                    if remaining_blanks == 1 and blank_answer:
+                        valid_cloze.append({
+                            "title": item.get('title', f"Question {blank_id}"),
+                            "paragraph": new_paragraph,
+                            "blanks": [{"id": blank_id, "answer": blank_answer, "explanation": blank.get('explanation', ''), "on_correct_example": blank.get('on_correct_example', '')}]
+                        })
+            else:
+                print(f"[summarizer] Final validation: cloze item rejected (no blanks found)")
+        
         if valid_cloze:
-            cloze = valid_cloze
+            # Rebuild paragraphs to safe templates if answer khớp template
+            rebuilt = []
+            for item in valid_cloze:
+                blanks = item.get("blanks", [])
+                if not blanks:
+                    continue
+                ans = blanks[0].get("answer", "")
+                key = ans.lower().strip()
+                tpl = safe_cloze_templates.get(key)
+                if tpl:
+                    rebuilt.append({
+                        "title": tpl["title"],
+                        "paragraph": tpl["paragraph"].replace("___1___", "___1___"),
+                        "blanks": [{
+                            "id": 1,
+                            "answer": ans,
+                            "explanation": tpl["explanation"],
+                            "on_correct_example": tpl["example"]
+                        }]
+                    })
+                else:
+                    rebuilt.append(item)
+            cloze = rebuilt
+            print(f"[summarizer] Final validation: cloze_tests post-processed to {len(cloze)} questions")
         else:
             print(f"[summarizer] Final validation: all cloze_tests rejected, using fallback")
             cloze = None
     
+    # Match Pairs: không được dùng placeholder - POST-PROCESS để thay thế placeholder bằng nghĩa thực tế
     if match_pairs:
         valid_pairs = []
+        placeholder_patterns = [
+            "nghĩa của", "nghĩa ngắn gọn", "ý nghĩa ngắn gọn", 
+            "thực tế của", "meaning of", "nghĩa của từ",
+            "nghĩa cụ thể của", "nghĩa tiếng việt của", "nghĩa của x"
+        ]
+        
+        # Tạo mapping từ summary_table để lấy nghĩa tiếng Việt
+        translation_map = {}
+        if summary_table:
+            for row in summary_table:
+                if isinstance(row, dict):
+                    word = row.get('word', '').lower()
+                    translation = row.get('translation', '')
+                    if word and translation:
+                        translation_map[word] = translation
+        
+        seen_words = set()
         for item in match_pairs:
-            if isinstance(item, dict):
-                meaning = item.get('meaning', '')
-                meaning_lower = str(meaning).lower()
-                placeholder_patterns = [
-                    "nghĩa của", "nghĩa ngắn gọn", "ý nghĩa ngắn gọn", 
-                    "thực tế của", "meaning of", "nghĩa của từ"
-                ]
-                if not any(pattern in meaning_lower for pattern in placeholder_patterns) and meaning.strip():
-                    valid_pairs.append(item)
+            if not isinstance(item, dict):
+                continue
+            word = item.get('word', '')
+            meaning = item.get('meaning', '')
+            meaning_lower = str(meaning).lower()
+            
+            # Kiểm tra xem có phải placeholder không
+            is_placeholder = any(pattern in meaning_lower for pattern in placeholder_patterns)
+            
+            word_key = word.lower().strip()
+            if not word_key or word_key in seen_words:
+                continue
+            seen_words.add(word_key)
+
+            if is_placeholder or not meaning.strip():
+                # Thay thế bằng translation_map nếu có, nếu không bỏ qua
+                if word_key in translation_map:
+                    item['meaning'] = translation_map[word_key]
                 else:
-                    print(f"[summarizer] Final validation: match_pair rejected (placeholder meaning: '{meaning}')")
+                    continue
+            # Rút gọn meaning tối đa 20 ký tự, 1-3 từ
+            meaning_clean = item.get('meaning', '').strip()
+            if not meaning_clean:
+                continue
+            words_meaning = meaning_clean.split()
+            meaning_short = " ".join(words_meaning[:3])
+            if len(meaning_short) > 20:
+                meaning_short = meaning_short[:20].rstrip()
+            item['meaning'] = meaning_short
+            valid_pairs.append(item)
+        
+        # Bổ sung thêm từ summary_table nếu thiếu nghĩa, nhưng không giới hạn số cặp
+        if summary_table:
+            for row in summary_table:
+                if not isinstance(row, dict):
+                    continue
+                w = row.get('word', '')
+                if not w:
+                    continue
+                w_key = w.lower().strip()
+                if any(p.get('word', '').lower().strip() == w_key for p in valid_pairs):
+                    continue
+                trans = row.get('translation', '')
+                if not trans:
+                    continue
+                meaning_short = " ".join(trans.split()[:3])
+                if len(meaning_short) > 20:
+                    meaning_short = meaning_short[:20].rstrip()
+                valid_pairs.append({"id": len(valid_pairs) + 1, "word": w, "meaning": meaning_short})
+
         if valid_pairs:
-            match_pairs = valid_pairs
+            match_pairs = valid_pairs  # giữ toàn bộ để luyện nhiều vòng ở frontend
+            print(f"[summarizer] Final validation: match_pairs post-processed to {len(match_pairs)} pairs")
         else:
             print(f"[summarizer] Final validation: all match_pairs rejected, using fallback")
             match_pairs = None
 
+    # Merge kết quả: dùng LLM result nếu có và hợp lệ, nếu không thì dùng fallback
     return {
         "summary_table": summary_table if summary_table else fallback.get("summary_table"),
         "vocab_story": story if story else fallback.get("vocab_story"),
         "vocab_mcqs": mcqs if mcqs else fallback.get("vocab_mcqs"),
         "flashcards": flashcards if flashcards else fallback.get("flashcards"),
-        "mindmap": mindmap if mindmap else fallback.get("mindmap"),
         "cloze_tests": cloze if cloze else fallback.get("cloze_tests"),
         "match_pairs": match_pairs if match_pairs else fallback.get("match_pairs"),
     }

@@ -23,6 +23,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Relationship với notes và feedbacks
     notes = relationship("Note", back_populates="user", cascade="all, delete-orphan")
     feedbacks = relationship("Feedback", back_populates="user", cascade="all, delete-orphan")
     
@@ -36,32 +37,39 @@ class Note(Base):
     """
     __tablename__ = 'notes'
     __table_args__ = (
+        # Đảm bảo note_id chỉ unique trong phạm vi từng user
         UniqueConstraint('user_id', 'note_id', name='uq_notes_user_note_id'),
     )
     
     id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(PGUUID(as_uuid=True), ForeignKey('users.id'), nullable=False, index=True)
     
+    # Metadata
     note_id = Column(String(100), nullable=False, index=True)  
     file_type = Column(String(50), nullable=True) 
     filename = Column(String(255), nullable=True)  
     file_size = Column(Integer, nullable=True)  
     
+    # Processed content
     raw_text = Column(Text, nullable=True)  
     processed_text = Column(Text, nullable=True)  
     
+    # AI Results
     summary = Column(Text, nullable=True)  
     summaries = Column(JSON, nullable=True)  
     questions = Column(JSON, nullable=True)  
     mcqs = Column(JSON, nullable=True)  
     review = Column(JSON, nullable=True)  
     
-    job_id = Column(String(100), nullable=True, index=True) 
+    # Job tracking (cho async processing)
+    job_id = Column(String(100), nullable=True, index=True)  # Celery job ID
     
+    # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     processed_at = Column(DateTime, nullable=True)  
-   
+    
+    # Relationship
     user = relationship("User", back_populates="notes")
     feedbacks = relationship("Feedback", back_populates="note", cascade="all, delete-orphan")
     
@@ -103,19 +111,25 @@ class Feedback(Base):
     note_id = Column(PGUUID(as_uuid=True), ForeignKey('notes.id'), nullable=False, index=True)
     user_id = Column(PGUUID(as_uuid=True), ForeignKey('users.id'), nullable=False, index=True)
     
+    # Rating (1-5 stars)
     rating = Column(Integer, nullable=False)
     
+    # Feedback content
     comment = Column(Text, nullable=True) 
     feedback_type = Column(String(50), nullable=True)  
     
+    # What user liked/disliked
     liked_aspects = Column(JSON, nullable=True) 
     disliked_aspects = Column(JSON, nullable=True) 
     
+    # Suggestions for improvement
     suggestions = Column(Text, nullable=True) 
     
+    # Metadata
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Relationships
     note = relationship("Note", back_populates="feedbacks")
     user = relationship("User", back_populates="feedbacks")
     
