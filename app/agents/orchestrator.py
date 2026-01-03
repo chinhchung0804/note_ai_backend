@@ -28,6 +28,7 @@ async def process_text(
     use_rag: bool = True,
     content_type: Optional[str] = None,
     checked_vocab_items: Optional[str] = None,
+    account_type: str = "free",  # ⭐ NEW: Account type for model selection
 ):
     """
     Xử lý text input trực tiếp từ người dùng
@@ -37,12 +38,13 @@ async def process_text(
         text: Text input
         db: Database session (optional, để dùng RAG)
         use_rag: Có sử dụng RAG để cải thiện prompt không (default: True)
+        account_type: Account type (free/pro/enterprise) for AI model selection
     """
     # Step 1: Clean text
     txt = clean_text(text)
     
     if content_type == 'checklist':
-        vocab_bundle = await generate_vocab_bundle(txt, checked_vocab_items)
+        vocab_bundle = await generate_vocab_bundle(txt, checked_vocab_items, account_type)  # ⭐ Pass account_type
         return build_output(
             summaries=None,
             review={'valid': True, 'notes': 'Vocab checklist từ text'},
@@ -64,7 +66,8 @@ async def process_text(
         raw_text=txt,
         db=db,
         file_type='text',
-        use_rag=use_rag
+        use_rag=use_rag,
+        account_type=account_type  # ⭐ Pass account_type
     )
 
     # Step 3: Build output
@@ -163,6 +166,7 @@ async def process_file(
     use_rag: bool = True,
     content_type: Optional[str] = None,
     checked_vocab_items: Optional[str] = None,
+    account_type: str = "free",  # ⭐ NEW: Account type for model selection
 ):
     """
     Xử lý file upload đơn lẻ (giữ behaviour cũ để không phá API hiện tại)
@@ -180,7 +184,8 @@ async def process_file(
     if content_type == 'checklist':
         vocab_bundle = await generate_vocab_bundle(
             extracted['processed_text'],
-            checked_vocab_items
+            checked_vocab_items,
+            account_type  # ⭐ Pass account_type
         )
         return build_output(
             summaries=None,
@@ -202,7 +207,8 @@ async def process_file(
         raw_text=extracted['processed_text'],
         db=db,
         file_type=extracted['input_type'],
-        use_rag=use_rag
+        use_rag=use_rag,
+        account_type=account_type  # ⭐ Pass account_type
     )
 
     return build_output(
@@ -222,25 +228,30 @@ async def process_combined_inputs(
     use_rag: bool = True,
     content_type: Optional[str] = None,
     checked_vocab_items: Optional[str] = None,
+    account_type: str = "free",  # ⭐ NEW: Account type for model selection
 ):
     """
     Xử lý đồng thời nhiều nguồn input (text + nhiều file) rồi gộp lại thành một ghi chú hoàn chỉnh.
+    
+    Với chức năng summary: tạo summary riêng cho text và từng file để dễ hiển thị trên UI.
     """
     files = files or []
     sources: List[Dict] = []
     combined_chunks: List[str] = []
-
+    
+    text_note_cleaned = None
     if text_note and text_note.strip():
-        cleaned_text = clean_text(text_note)
+        text_note_cleaned = clean_text(text_note)
         sources.append({
             'type': 'text',
             'source': 'note_body',
             'raw_text': text_note,
-            'processed_text': cleaned_text,
+            'processed_text': text_note_cleaned,
             'review': {'valid': True, 'notes': 'Input từ ghi chú'}
         })
-        combined_chunks.append(cleaned_text)
+        combined_chunks.append(text_note_cleaned)
 
+    file_sources = []
     for upload_file in files:
         extracted = await _extract_text_from_upload(upload_file)
         proc_text = extracted.get('processed_text') or extracted.get('raw_text') or ''
@@ -254,8 +265,13 @@ async def process_combined_inputs(
         if extracted['error']:
             source_entry['error'] = extracted['error']
         sources.append(source_entry)
-
+        
         if proc_text:
+            file_sources.append({
+                'filename': upload_file.filename,
+                'processed_text': proc_text,
+                'file_type': extracted['input_type']
+            })
             label = upload_file.filename or extracted['input_type']
             combined_chunks.append(f"[Source: {label}]\\n{proc_text}")
 
@@ -276,7 +292,8 @@ async def process_combined_inputs(
         print(f"[orchestrator] Generating vocab bundle for checklist (6 features)")
         vocab_bundle = await generate_vocab_bundle(
             combined_text,
-            checked_vocab_items
+            checked_vocab_items,
+            account_type  # ⭐ Pass account_type
         )
         return build_output(
             summaries=None,  
@@ -294,21 +311,91 @@ async def process_combined_inputs(
             match_pairs=vocab_bundle.get('match_pairs'),
         )
     else:
-        print(f"[orchestrator] Generating learning assets for text note (4 features)")
-        learning_assets = await generate_learning_assets(
-            raw_text=combined_text,
-            db=db,
-            file_type='combined',
-            use_rag=use_rag
-        )
-    return build_output(
-        summaries=learning_assets.get('summaries'),
-        review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input'},
-        raw_text=combined_text,
-        processed_text=combined_text,
-        questions=learning_assets.get('questions'),
-        mcqs=learning_assets.get('mcqs'),
-        sources=sources
-    )
+        print(f"[orchestrator] Generating learning assets for combined note (4 features)")
+        
+        # ⚡ TỐI ƯU: Chỉ gọi AI 1 lần cho combined, sau đó gọi parallel cho separate summaries
+        text_summary = None
+        files_summaries = []
+        
+        if text_note_cleaned and file_sources:
+            # Có cả text và file -> gọi AI song song (parallel) để tiết kiệm thời gian
+            print(f"[orchestrator] Generating summaries in PARALLEL: combined + text + {len(file_sources)} file(s)")
+            
+            # ⚡ Tạo list tasks để chạy song song
+            tasks = []
+            
+            # Task 1: Combined summary (cho questions, mcqs, backward compatibility)
+            tasks.append(generate_learning_assets(
+                raw_text=combined_text,
+                db=db,
+                file_type='combined',
+                use_rag=use_rag,
+                account_type=account_type  # ⭐ Pass account_type
+            ))
+            
+            # Task 2: Text summary
+            tasks.append(generate_learning_assets(
+                raw_text=text_note_cleaned,
+                db=db,
+                file_type='text',
+                use_rag=use_rag,
+                account_type=account_type  # ⭐ Pass account_type
+            ))
+            
+            # Task 3+: File summaries
+            for file_info in file_sources:
+                tasks.append(generate_learning_assets(
+                    raw_text=file_info['processed_text'],
+                    db=db,
+                    file_type=file_info['file_type'],
+                    use_rag=use_rag,
+                    account_type=account_type  # ⭐ Pass account_type
+                ))
+            
+            # ⚡ Chạy TẤT CẢ tasks SONG SONG (parallel) - tiết kiệm thời gian!
+            results = await asyncio.gather(*tasks)
+            
+            # Lấy kết quả
+            combined_assets = results[0]  # Task 1
+            text_summary = results[1].get('summaries')  # Task 2
+            
+            # Tasks 3+ (file summaries)
+            for idx, file_info in enumerate(file_sources):
+                file_result = results[idx + 2]  # +2 vì 0=combined, 1=text
+                files_summaries.append({
+                    'filename': file_info['filename'],
+                    'file_type': file_info['file_type'],
+                    'summaries': file_result.get('summaries')
+                })
+            
+            return build_output(
+                summaries=combined_assets.get('summaries'),
+                review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input'},
+                raw_text=combined_text,
+                processed_text=combined_text,
+                questions=combined_assets.get('questions'),
+                mcqs=combined_assets.get('mcqs'),
+                sources=sources,
+                text_summary=text_summary,
+                files_summaries=files_summaries
+            )
+        else:
+            # Chỉ có text hoặc chỉ có file -> chỉ gọi AI 1 lần
+            learning_assets = await generate_learning_assets(
+                raw_text=combined_text,
+                db=db,
+                file_type='combined',
+                use_rag=use_rag,
+                account_type=account_type  # ⭐ Pass account_type
+            )
+            return build_output(
+                summaries=learning_assets.get('summaries'),
+                review={'valid': True, 'notes': 'Kết hợp nhiều nguồn input'},
+                raw_text=combined_text,
+                processed_text=combined_text,
+                questions=learning_assets.get('questions'),
+                mcqs=learning_assets.get('mcqs'),
+                sources=sources
+            )
 
 

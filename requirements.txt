@@ -25,6 +25,7 @@ boto3>=1.34.0
 
 # Data validation
 pydantic>=2.7.0
+email-validator>=2.1.0
 
 # Database
 sqlalchemy>=2.0.0
@@ -37,3 +38,11 @@ requests>=2.31.0
 
 # CrewAI agents
 crewai[tools,google-genai]>=0.64.0
+
+# Authentication & Security
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.9
+
+# Payment Integration
+stripe>=7.0.0

@@ -7,7 +7,7 @@ from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from sqlalchemy.orm import Session
 
-from app.agents.llm_config import get_openai_chat_llm
+from app.agents.llm_config import get_openai_chat_llm, get_chat_llm_for_account
 
 PRIMARY_LLM = get_openai_chat_llm(temperature=0.2)
 TRANSLATE_LLM = PRIMARY_LLM  
@@ -34,90 +34,139 @@ GLOBAL_VOCAB_RULES = (
 )
 
 summary_prompt_template = PromptTemplate(
-    input_variables=['instructions', 'raw_text'],
+    input_variables=["instructions", "raw_text"],
     template=(
         "{instructions}\n\n"
-        "NHIỆM VỤ: Tạo JSON theo đúng schema sau (CHỈ trả về JSON, không có markdown, không có giải thích):\n"
-        "{{\n"
-        '  "one_sentence": "Tóm tắt 1 câu",\n'
-        '  "short_paragraph": "Tóm tắt 3-5 câu",\n'
-        '  "bullet_points": ["Ý 1", "Ý 2", "Ý 3"]\n'
-        "}}\n"
-        "QUAN TRỌNG: Trả về CHỈ JSON thuần túy, không có ```json``` hoặc text thêm.\n\n"
-        "NỘI DUNG GỐC:\n{raw_text}\n"
+
+        "VAI TRÒ: Bạn là trợ lý học tập, có nhiệm vụ DIỄN GIẢI lại nội dung cho người học.\n\n"
+
+        "NHIỆM VỤ:\n"
+        "- Đọc và HIỂU nội dung gốc.\n"
+        "- KHÔNG sao chép câu chữ từ nội dung gốc.\n"
+        "- Chỉ giữ lại Ý NGHĨA CỐT LÕI.\n"
+        "- Diễn đạt bằng NGÔN NGỮ CỦA BẠN như đang giải thích cho sinh viên.\n\n"
+
+        "QUY TẮC NGHIÊM NGẶT:\n"
+        "- Không copy hoặc paraphrase quá sát nội dung gốc.\n"
+        "- Không nhắc đến hình ảnh, nguồn, hay file.\n"
+        "- Mỗi phần phải dùng cách diễn đạt KHÁC NHAU.\n\n"
+
+        "OUTPUT: Trả về JSON đúng schema sau (CHỈ JSON, không markdown, không giải thích):\n"
+        "{\n"
+        '  "one_sentence": "1 câu khái quát, mang tính định nghĩa tổng quát",\n'
+        '  "short_paragraph": "3–5 câu giải thích bản chất, vai trò, và giá trị",\n'
+        '  "bullet_points": [\n'
+        '    "Ý chính 1 (khái niệm)",\n'
+        '    "Ý chính 2 (đặc điểm / cơ chế)",\n'
+        '    "Ý chính 3 (ứng dụng / tác động)",\n'
+        '    "Ý chính 4 (hạn chế hoặc xu hướng nếu có)"\n'
+        '  ]\n'
+        "}\n\n"
+
+        "NỘI DUNG GỐC:\n"
+        "{raw_text}"
     )
 )
 
 question_prompt_template = PromptTemplate(
-    input_variables=['raw_text'],
+    input_variables=["raw_text"],
     template=(
-        "Bạn là giáo viên chuyên tạo câu hỏi ôn tập chất lượng cao. Dựa vào ghi chú sau, tạo 5-10 câu hỏi tự luận"
-        " giúp người học hiểu sâu và nhớ nội dung.\n\n"
-        "Yêu cầu:\n"
-        "- Mỗi câu hỏi phải kiểm tra hiểu biết, không chỉ nhớ máy móc\n"
-        "- Câu hỏi đa dạng: có câu hỏi về khái niệm, so sánh, phân tích, áp dụng\n"
-        "- Câu hỏi phải rõ ràng, cụ thể, không mơ hồ\n"
-        "- Đáp án phải ngắn gọn nhưng đầy đủ thông tin quan trọng (2-4 câu)\n"
-        "- Không được tạo câu hỏi chỉ lặp lại nguyên văn nội dung ghi chú\n\n"
-        "Trả về JSON đúng schema (CHỈ JSON, không có markdown):\n"
-        "{{\n"
+        "VAI TRÒ: Bạn là giảng viên đại học, chuyên ra câu hỏi kiểm tra HIỂU BIẾT.\n\n"
+
+        "MỤC TIÊU:\n"
+        "- Đánh giá khả năng hiểu, phân tích và vận dụng kiến thức.\n"
+        "- Tuyệt đối KHÔNG hỏi theo kiểu chép lại nội dung.\n\n"
+
+        "YÊU CẦU CÂU HỎI:\n"
+        "- 5–8 câu hỏi tự luận.\n"
+        "- Mỗi câu hỏi phải buộc người học DIỄN GIẢI hoặc SUY LUẬN.\n"
+        "- Ít nhất gồm:\n"
+        "  + 1 câu về bản chất / khái niệm\n"
+        "  + 1 câu phân tích cơ chế hoạt động\n"
+        "  + 1 câu so sánh / đánh giá\n"
+        "  + 1 câu ứng dụng thực tế\n\n"
+
+        "YÊU CẦU ĐÁP ÁN:\n"
+        "- 2–4 câu.\n"
+        "- Không lặp lại nguyên văn câu hỏi.\n"
+        "- Không sao chép câu chữ từ ghi chú.\n"
+        "- Diễn đạt như đang giải thích cho người mới học.\n\n"
+
+        "OUTPUT JSON (CHỈ JSON):\n"
+        "{\n"
         '  "questions": [\n'
-        '    {{"question": "Câu hỏi kiểm tra hiểu biết về khái niệm/ý chính", "answer": "Đáp án ngắn gọn nhưng đầy đủ (2-4 câu)"}},\n'
-        '    {{"question": "Câu hỏi yêu cầu so sánh/phân tích", "answer": "Đáp án chi tiết"}},\n'
-        '    {{"question": "Câu hỏi về ứng dụng/thực tế", "answer": "Đáp án cụ thể"}}\n'
+        '    {\n'
+        '      "question": "Câu hỏi yêu cầu hiểu và giải thích",\n'
+        '      "answer": "Đáp án diễn giải, ngắn gọn nhưng đầy đủ"\n'
+        '    }\n'
         "  ]\n"
-        "}}\n"
-        "QUAN TRỌNG: Trả về CHỈ JSON thuần túy, không có ```json``` hoặc text thêm.\n\n"
-        "Ghi chú:\n{raw_text}\n"
+        "}\n\n"
+
+        "GHI CHÚ HỌC TẬP:\n"
+        "{raw_text}"
     )
 )
 
 mcq_prompt_template = PromptTemplate(
-    input_variables=['raw_text'],
+    input_variables=["raw_text"],
     template=(
-        "Bạn là giáo viên chuyên tạo câu hỏi trắc nghiệm chất lượng cao. Dựa vào ghi chú sau, tạo câu hỏi trắc nghiệm với các yêu cầu:\n\n"
+        "Bạn là chuyên gia ra đề thi trắc nghiệm, tạo câu hỏi chất lượng cao như đề kiểm tra / đề thi thực tế.\n\n"
+
+        "QUY TẮC TUYỆT ĐỐI:\n"
+        "- Mỗi câu hỏi CHỈ kiểm tra MỘT khái niệm hoặc ý chính duy nhất.\n"
+        "- Câu hỏi phải độc lập, có thể hiểu được mà KHÔNG cần đọc lại toàn bộ ghi chú.\n"
+        "- KHÔNG sao chép nguyên câu hoặc đoạn dài từ ghi chú.\n\n"
+
+        "QUY TẮC PHÂN BỐ ĐÁP ÁN (RẤT QUAN TRỌNG):\n"
+        "- Đáp án đúng KHÔNG ĐƯỢC luôn là A.\n"
+        "- Phải phân bố đáp án đúng ĐỀU giữa A, B, C và D.\n"
+        "- Nếu tạo nhiều câu hỏi:\n"
+        "  + LUÂN PHIÊN vị trí đáp án đúng.\n"
+        "  + KHÔNG đặt đáp án đúng trùng vị trí liên tiếp.\n"
+        "- TRƯỚC KHI trả JSON, PHẢI kiểm tra lại để đảm bảo phân bố đáp án cân bằng.\n\n"
+
         "YÊU CẦU VỀ CÂU HỎI:\n"
-        "- Câu hỏi phải NGẮN GỌN, rõ ràng, chỉ hỏi về một khái niệm/ý chính cụ thể\n"
-        "- KHÔNG được copy-paste toàn bộ nội dung ghi chú vào câu hỏi\n"
-        "- KHÔNG được đặt câu hỏi dạng 'Dựa trên ghi chú, ý nào mô tả chính xác nhất: [toàn bộ đoạn văn dài]'\n"
-        "- Câu hỏi phải độc lập, có thể hiểu được mà không cần đọc lại toàn bộ ghi chú\n"
-        "- Mỗi độ khó (easy, medium, hard) tạo từ 3-5 câu hỏi\n"
-        "- Mỗi câu hỏi phải kiểm tra hiểu biết về nội dung ghi chú, không chỉ nhớ máy móc\n\n"
-        "YÊU CẦU VỀ ĐÁP ÁN:\n"
-        "- Mỗi câu có 4 phương án A, B, C, D\n"
-        "- Đáp án đúng phải phân bố đều (không phải tất cả đều A)\n"
-        "- Các phương án phải NGẮN GỌN, rõ ràng (1-2 câu), không lặp lại toàn bộ nội dung ghi chú\n"
+        "- Mỗi mức độ: easy / medium / hard tạo từ 3–5 câu hỏi.\n"
+        "- Câu hỏi phải kiểm tra HIỂU BẢN CHẤT, không chỉ học thuộc.\n\n"
+
+        "QUY TẮC CHỐNG LỘ ĐÁP ÁN (BẮT BUỘC):"
+        "- Phương án đúng KHÔNG được trùng hoặc gần trùng câu chữ trong ghi chú."
+        "- Phương án đúng phải là câu TỔNG HỢP hoặc SUY RA từ nội dung."
+        "- Nếu một phương án giống ghi chú hơn các phương án khác → CÂU HỎI ĐÓ KHÔNG HỢP LỆ."
+
+        "YÊU CẦU VỀ PHƯƠNG ÁN:\n"
+        "- Mỗi câu có đúng 4 phương án A / B / C / D.\n"
+        "- Tất cả phương án đều NGẮN GỌN (1–2 câu).\n"
         "- Các phương án sai (distractors) phải:\n"
-        "  + Có vẻ hợp lý và liên quan đến chủ đề\n"
-        "  + Dựa trên thông tin trong ghi chú nhưng sai hoặc không chính xác\n"
-        "  + Không được quá rõ ràng là sai\n"
-        "  + Có nội dung thực tế, không được chung chung như 'Nội dung hoàn toàn khác' hoặc 'Không có trong ghi chú'\n"
-        "- Explanation phải giải thích ngắn gọn tại sao đáp án đúng và tại sao các phương án khác sai\n\n"
-        "VÍ DỤ CÂU HỎI ĐÚNG:\n"
-        "- Large Language Model (LLM) là gì?\n"
-        "- Kiến trúc chính được sử dụng trong LLM là gì?\n"
-        "- Mô hình LLM nào sau đây được phát triển bởi OpenAI?\n\n"
-        "VÍ DỤ CÂU HỎI SAI (KHÔNG ĐƯỢC LÀM):\n"
-        "- Dựa trên ghi chú, ý nào mô tả chính xác nhất: [copy toàn bộ đoạn văn dài từ ghi chú]\n"
-        "- Theo nội dung trên, thông tin nào đúng: [paste lại toàn bộ định nghĩa]\n\n"
-        "Trả về JSON đúng schema (CHỈ JSON, không có markdown):\n"
-        "{{\n"
+        "  + Có vẻ hợp lý\n"
+        "  + Liên quan trực tiếp đến nội dung ghi chú\n"
+        "  + Sai về bản chất, KHÔNG được quá lộ liễu\n\n"
+
+        "ĐỊNH DẠNG OUTPUT:\n"
+        "- CHỈ trả về JSON hợp lệ.\n"
+        "- KHÔNG markdown, KHÔNG giải thích thêm bên ngoài.\n\n"
+
+        "SCHEMA JSON (GIỮ NGUYÊN):\n"
+        "{\n"
         '  "easy": [\n'
-        '    {{"question": "Câu hỏi ngắn gọn về khái niệm cơ bản (1 câu)", "options": {{"A": "Đáp án đúng ngắn gọn (1-2 câu)", "B": "Phương án sai nhưng hợp lý (1-2 câu)", "C": "Phương án sai nhưng liên quan (1-2 câu)", "D": "Phương án sai nhưng có vẻ đúng (1-2 câu)"}}, "answer": "A", "explanation": "Giải thích ngắn gọn tại sao A đúng và B, C, D sai"}}\n'
+        '    {\n'
+        '      "question": "Câu hỏi ngắn gọn",\n'
+        '      "options": {\n'
+        '        "A": "Phương án A",\n'
+        '        "B": "Phương án B",\n'
+        '        "C": "Phương án C",\n'
+        '        "D": "Phương án D"\n'
+        '      },\n'
+        '      "answer": "A | B | C | D",\n'
+        '      "explanation": "Giải thích ngắn gọn vì sao đáp án đúng."\n'
+        '    }\n'
         "  ],\n"
-        '  "medium": [\n'
-        '    {{"question": "Câu hỏi ngắn gọn yêu cầu hiểu sâu hơn (1 câu)", "options": {{"A": "Phương án sai ngắn gọn", "B": "Đáp án đúng ngắn gọn", "C": "Phương án sai ngắn gọn", "D": "Phương án sai ngắn gọn"}}, "answer": "B", "explanation": "Giải thích ngắn gọn"}}\n'
-        "  ],\n"
-        '  "hard": [\n'
-        '    {{"question": "Câu hỏi ngắn gọn về phân tích, so sánh hoặc áp dụng (1 câu)", "options": {{"A": "Phương án sai ngắn gọn", "B": "Phương án sai ngắn gọn", "C": "Đáp án đúng ngắn gọn", "D": "Phương án sai ngắn gọn"}}, "answer": "C", "explanation": "Giải thích ngắn gọn"}}\n'
-        "  ]\n"
-        "}}\n"
-        "QUAN TRỌNG:\n"
-        "- Trả về CHỈ JSON thuần túy, không có ```json``` hoặc text thêm\n"
-        "- Đảm bảo đáp án đúng phân bố đều giữa A, B, C, D\n"
-        "- Câu hỏi và đáp án phải NGẮN GỌN, KHÔNG lặp lại toàn bộ nội dung ghi chú\n"
-        "- Câu hỏi phải độc lập, có thể hiểu được mà không cần đọc lại ghi chú\n\n"
-        "Ghi chú:\n{raw_text}\n"
+        '  "medium": [ ... ],\n'
+        '  "hard": [ ... ]\n'
+        "}\n\n"
+
+        "NỘI DUNG GHI CHÚ:\n"
+        "{{ raw_text }}"
     )
 )
 
@@ -805,12 +854,18 @@ async def generate_summary_bundle(
     raw_text: str,
     db: Optional[Session] = None,
     file_type: Optional[str] = None,
-    use_rag: bool = True
+    use_rag: bool = True,
+    account_type: str = "free"  # ⭐ NEW: Account type for model selection
 ) -> Dict[str, Any]:
     instructions = _build_summary_instructions(db, raw_text, file_type, use_rag)
+    
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    summary_chain_dynamic = LLMChain(llm=llm, prompt=summary_prompt_template)
+    
     try:
         response = await _run_chain_with_fallback(
-            summary_chain,
+            summary_chain_dynamic,
             'summary',
             {'instructions': instructions, 'raw_text': raw_text}
         )
@@ -825,10 +880,14 @@ async def generate_summary_bundle(
     
     return _fallback_summary(raw_text)
 
-async def generate_question_set(raw_text: str) -> List[Dict[str, str]]:
+async def generate_question_set(raw_text: str, account_type: str = "free") -> List[Dict[str, str]]:
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    question_chain_dynamic = LLMChain(llm=llm, prompt=question_prompt_template)
+    
     try:
         response = await _run_chain_with_fallback(
-            question_chain,
+            question_chain_dynamic,
             'question',
             {'raw_text': raw_text}
         )
@@ -839,10 +898,14 @@ async def generate_question_set(raw_text: str) -> List[Dict[str, str]]:
         print(f"[summarizer] Error generating questions: {exc}")
     return _fallback_questions(raw_text)
 
-async def generate_mcq_set(raw_text: str) -> Dict[str, List[Dict[str, Any]]]:
+async def generate_mcq_set(raw_text: str, account_type: str = "free") -> Dict[str, List[Dict[str, Any]]]:
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    mcq_chain_dynamic = LLMChain(llm=llm, prompt=mcq_prompt_template)
+    
     try:
         response = await _run_chain_with_fallback(
-            mcq_chain,
+            mcq_chain_dynamic,
             'mcq',
             {'raw_text': raw_text}
         )
@@ -864,16 +927,18 @@ async def generate_learning_assets(
     raw_text: str,
     db: Optional[Session] = None,
     file_type: Optional[str] = None,
-    use_rag: bool = True
+    use_rag: bool = True,
+    account_type: str = "free"  # ⭐ NEW: Account type for model selection
 ) -> Dict[str, Any]:
     summaries = await generate_summary_bundle(
         raw_text=raw_text,
         db=db,
         file_type=file_type,
-        use_rag=use_rag
+        use_rag=use_rag,
+        account_type=account_type  # ⭐ Pass account type
     )
-    questions = await generate_question_set(raw_text)
-    mcqs = await generate_mcq_set(raw_text)
+    questions = await generate_question_set(raw_text, account_type=account_type)  # ⭐ Pass account type
+    mcqs = await generate_mcq_set(raw_text, account_type=account_type)  # ⭐ Pass account type
     return {
         'summaries': summaries,
         'questions': questions,
@@ -989,15 +1054,20 @@ def _parse_vocab_list(raw_text: str, checked_vocab_items: Optional[str]) -> List
     return vocab_words
 
 
-async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
+async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str], account_type: str = "free") -> Optional[List[Dict[str, Any]]]:
     vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
         "raw_text": raw_text or "",
         "vocab_list": vocab_list_str,
     }
     print(f"[summarizer] _generate_vocab_summary_table: raw_text length={len(raw_text)}, vocab_list count={len(vocab_list)}, vocab_list_str length={len(vocab_list_str)}")
+    
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    vocab_summary_table_chain_dynamic = LLMChain(llm=llm, prompt=vocab_summary_table_template)
+    
     try:
-        response = await _run_chain_with_fallback(vocab_summary_table_chain, 'vocab_summary_table', payload)
+        response = await _run_chain_with_fallback(vocab_summary_table_chain_dynamic, 'vocab_summary_table', payload)
         parsed = _safe_json_loads(response, None)
         if isinstance(parsed, list) and len(parsed) > 0:
             valid_items = []
@@ -1022,7 +1092,7 @@ async def _generate_vocab_summary_table(raw_text: str, vocab_list: List[str]) ->
     return None
 
 
-async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[Dict[str, Any]]:
+async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_count: int = 0, account_type: str = "free") -> Optional[Dict[str, Any]]:
     if not vocab_list:
         print(f"[summarizer] Vocab story: vocab_list is empty, cannot generate story")
         return None
@@ -1036,8 +1106,13 @@ async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_coun
     }
     print(f"[summarizer] _generate_vocab_story: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     max_retries = 2
+    
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    vocab_story_chain_dynamic = LLMChain(llm=llm, prompt=vocab_story_template)
+    
     try:
-        response = await _run_chain_with_fallback(vocab_story_chain, 'vocab_story', payload)
+        response = await _run_chain_with_fallback(vocab_story_chain_dynamic, 'vocab_story', payload)
         # Log response để debug
         if response and len(response) > 500:
             print(f"[summarizer] Vocab story response (first 500 chars): {response[:500]}")
@@ -1103,7 +1178,7 @@ async def _generate_vocab_story(raw_text: str, vocab_list: List[str], retry_coun
     return None
 
 
-async def _generate_vocab_mcqs(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
+async def _generate_vocab_mcqs(raw_text: str, vocab_list: List[str], account_type: str = "free") -> Optional[List[Dict[str, Any]]]:
     """
     Generate vocab MCQs in chunks to avoid long single-call latency/timeouts.
     For each vocab word: require 2 questions (meaning + context).
@@ -1128,6 +1203,10 @@ async def _generate_vocab_mcqs(raw_text: str, vocab_list: List[str]) -> Optional
         f"vocab_list count={len(vocab_list)}, chunks={len(chunks)}, chunk_size={chunk_size}"
     )
 
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    vocab_mcq_chain_dynamic = LLMChain(llm=llm, prompt=vocab_mcq_template)
+
     sem = asyncio.Semaphore(2)  # limit concurrency to avoid overwhelming the LLM
 
     async def _run_chunk(chunk_words: List[str], chunk_idx: int) -> List[Dict[str, Any]]:
@@ -1142,7 +1221,7 @@ async def _generate_vocab_mcqs(raw_text: str, vocab_list: List[str]) -> Optional
                 f"vocab_count={len(chunk_words)}, vocab_list_str length={len(vocab_list_str)}"
             )
             try:
-                response = await _run_chain_with_fallback(vocab_mcq_chain, "vocab_mcq", payload)
+                response = await _run_chain_with_fallback(vocab_mcq_chain_dynamic, "vocab_mcq", payload)
                 parsed = _safe_json_loads(response, None)
                 if not isinstance(parsed, list) or not parsed:
                     return []
@@ -1208,7 +1287,7 @@ async def _generate_vocab_mcqs(raw_text: str, vocab_list: List[str]) -> Optional
     return merged
 
 
-async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[List[Dict[str, Any]]]:
+async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_count: int = 0, account_type: str = "free") -> Optional[List[Dict[str, Any]]]:
     # Validate và prepare input variables
     vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
@@ -1217,8 +1296,13 @@ async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_coun
     }
     print(f"[summarizer] _generate_cloze_tests: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     max_retries = 2
+    
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    cloze_chain_dynamic = LLMChain(llm=llm, prompt=cloze_template)
+    
     try:
-        response = await _run_chain_with_fallback(cloze_chain, 'cloze', payload)
+        response = await _run_chain_with_fallback(cloze_chain_dynamic, 'cloze', payload)
         parsed = _safe_json_loads(response, None)
         if isinstance(parsed, list) and len(parsed) > 0:
             valid_items = []
@@ -1264,11 +1348,11 @@ async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_coun
                 # Retry nếu chưa đạt yêu cầu
                 if retry_count < max_retries:
                     print(f"[summarizer] Retrying cloze test generation (attempt {retry_count + 1}/{max_retries})")
-                    return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1)
+                    return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1, account_type)
         else:
             if retry_count < max_retries:
                 print(f"[summarizer] Retrying cloze test generation (attempt {retry_count + 1}/{max_retries})")
-                return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1)
+                return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1, account_type)
     except Exception as exc:
         print(f"[summarizer] Error generating cloze tests: {exc}")
         error_msg = str(exc)
@@ -1281,11 +1365,11 @@ async def _generate_cloze_tests(raw_text: str, vocab_list: List[str], retry_coun
         # Không retry nếu là rate limit (sẽ dùng fallback thay vì retry)
         if retry_count < max_retries and not is_rate_limit:
             print(f"[summarizer] Retrying cloze test generation after error (attempt {retry_count + 1}/{max_retries})")
-            return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1)
+            return await _generate_cloze_tests(raw_text, vocab_list, retry_count + 1, account_type)
     return None
 
 
-async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_count: int = 0) -> Optional[List[Dict[str, Any]]]:
+async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_count: int = 0, account_type: str = "free") -> Optional[List[Dict[str, Any]]]:
     # Validate và prepare input variables
     vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
@@ -1294,8 +1378,13 @@ async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_coun
     }
     print(f"[summarizer] _generate_match_pairs: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
     max_retries = 2
+    
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    match_pairs_chain_dynamic = LLMChain(llm=llm, prompt=match_pairs_template)
+    
     try:
-        response = await _run_chain_with_fallback(match_pairs_chain, 'match_pairs', payload)
+        response = await _run_chain_with_fallback(match_pairs_chain_dynamic, 'match_pairs', payload)
         parsed = _safe_json_loads(response, None)
         if isinstance(parsed, list) and len(parsed) > 0:
             valid_items = []
@@ -1330,11 +1419,11 @@ async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_coun
                 print(f"[summarizer] Match pairs rejected: 0 valid pairs")
                 if retry_count < max_retries:
                     print(f"[summarizer] Retrying match pairs generation (attempt {retry_count + 1}/{max_retries})")
-                    return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
+                    return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1, account_type)
         else:
             if retry_count < max_retries:
                 print(f"[summarizer] Retrying match pairs generation (attempt {retry_count + 1}/{max_retries})")
-                return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
+                return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1, account_type)
     except Exception as exc:
         print(f"[summarizer] Error generating match pairs: {exc}")
         error_msg = str(exc)
@@ -1347,11 +1436,11 @@ async def _generate_match_pairs(raw_text: str, vocab_list: List[str], retry_coun
         # Không retry nếu là rate limit (sẽ dùng fallback thay vì retry)
         if retry_count < max_retries and not is_rate_limit:
             print(f"[summarizer] Retrying match pairs generation after error (attempt {retry_count + 1}/{max_retries})")
-            return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1)
+            return await _generate_match_pairs(raw_text, vocab_list, retry_count + 1, account_type)
     return None
 
 
-async def _generate_flashcards(raw_text: str, vocab_list: List[str]) -> Optional[List[Dict[str, Any]]]:
+async def _generate_flashcards(raw_text: str, vocab_list: List[str], account_type: str = "free") -> Optional[List[Dict[str, Any]]]:
     # Validate và prepare input variables
     vocab_list_str = "\n".join(vocab_list) if vocab_list else ""
     payload = {
@@ -1359,8 +1448,13 @@ async def _generate_flashcards(raw_text: str, vocab_list: List[str]) -> Optional
         "vocab_list": vocab_list_str,
     }
     print(f"[summarizer] _generate_flashcards: raw_text length={len(raw_text)}, vocab_list_str length={len(vocab_list_str)}")
+    
+    # ⭐ Select model based on account type
+    llm = get_chat_llm_for_account(account_type, temperature=0.2)
+    flashcards_chain_dynamic = LLMChain(llm=llm, prompt=flashcards_template)
+    
     try:
-        response = await _run_chain_with_fallback(flashcards_chain, 'flashcards', payload)
+        response = await _run_chain_with_fallback(flashcards_chain_dynamic, 'flashcards', payload)
         parsed = _safe_json_loads(response, None)
         if isinstance(parsed, list) and len(parsed) > 0:
             valid_items = []
@@ -1397,17 +1491,166 @@ def _fallback_vocab_bundle(vocab_words: List[str]) -> Dict[str, Any]:
 async def generate_vocab_bundle(
     raw_text: str,
     checked_vocab_items: Optional[str] = None,
+    account_type: str = "free"  # ⭐ Account type for model selection and feature gating
 ) -> Dict[str, Any]:
+    """
+    Generate vocab bundle with features based on account type.
+    
+    FREE: 3 features (summary_table, flashcards, vocab_mcqs) - GPT-4o-mini
+    PRO/ENTERPRISE: 6 features (all) - GPT-4o-mini or GPT-4
+    """
+    from app.core.feature_config import get_enabled_vocab_features, get_upgrade_message
+    
     vocab_words = normalize_vocab_list(_parse_vocab_list(raw_text, checked_vocab_items))
-
-    summary_table, story, mcqs, flashcards, cloze, match_pairs = await asyncio.gather(
-        _generate_vocab_summary_table(raw_text, vocab_words),
-        _generate_vocab_story(raw_text, vocab_words),
-        _generate_vocab_mcqs(raw_text, vocab_words),
-        _generate_flashcards(raw_text, vocab_words),
-        _generate_cloze_tests(raw_text, vocab_words),
-        _generate_match_pairs(raw_text, vocab_words),
-    )
+    enabled_features = get_enabled_vocab_features(account_type)
+    
+    print(f"[summarizer] Vocab bundle for {account_type}: {len(enabled_features)} features enabled: {enabled_features}")
+    
+    # Prepare tasks based on enabled features
+    tasks = []
+    feature_names = []
+    
+    # Always enabled features
+    if "summary_table" in enabled_features:
+        tasks.append(_generate_vocab_summary_table(raw_text, vocab_words, account_type))
+        feature_names.append("summary_table")
+    
+    if "flashcards" in enabled_features:
+        tasks.append(_generate_flashcards(raw_text, vocab_words, account_type))
+        feature_names.append("flashcards")
+    
+    if "vocab_mcqs" in enabled_features:
+        tasks.append(_generate_vocab_mcqs(raw_text, vocab_words, account_type))
+        feature_names.append("vocab_mcqs")
+    
+    # PRO-only features
+    if "vocab_story" in enabled_features:
+        tasks.append(_generate_vocab_story(raw_text, vocab_words, account_type=account_type))
+        feature_names.append("vocab_story")
+    
+    if "cloze_tests" in enabled_features:
+        tasks.append(_generate_cloze_tests(raw_text, vocab_words, account_type=account_type))
+        feature_names.append("cloze_tests")
+    
+    if "match_pairs" in enabled_features:
+        tasks.append(_generate_match_pairs(raw_text, vocab_words, account_type=account_type))
+        feature_names.append("match_pairs")
+    
+    # Run enabled features in parallel
+    print(f"[summarizer] Running {len(tasks)} API calls in parallel for {account_type} account")
+    results = await asyncio.gather(*tasks)
+    
+    # Map results to feature names
+    feature_results = dict(zip(feature_names, results))
+    
+    # Get fallback bundle
+    fallback = _fallback_vocab_bundle(vocab_words)
+    
+    # Build response
+    response = {}
+    
+    # Summary table (always enabled)
+    summary_table = feature_results.get("summary_table")
+    response["summary_table"] = summary_table if summary_table else fallback.get("summary_table")
+    
+    # Flashcards (always enabled)
+    flashcards = feature_results.get("flashcards")
+    response["flashcards"] = flashcards if flashcards else fallback.get("flashcards")
+    
+    # Vocab MCQs (always enabled)
+    vocab_mcqs = feature_results.get("vocab_mcqs")
+    response["vocab_mcqs"] = vocab_mcqs if vocab_mcqs else fallback.get("vocab_mcqs")
+    
+    # Vocab story (PRO only)
+    if "vocab_story" in enabled_features:
+        story = feature_results.get("vocab_story")
+        if story:
+            story_paras = story.get('paragraphs', [])
+            if isinstance(story_paras, list):
+                processed_paras = [p.strip() for p in story_paras if isinstance(p, str) and p.strip()]
+                if processed_paras:
+                    story['paragraphs'] = processed_paras
+                    response["vocab_story"] = story
+                    print(f"[summarizer] Vocab story kept with {len(processed_paras)} paragraphs")
+                else:
+                    response["vocab_story"] = fallback.get("vocab_story")
+            else:
+                response["vocab_story"] = fallback.get("vocab_story")
+        else:
+            response["vocab_story"] = fallback.get("vocab_story")
+    else:
+        # Feature disabled - return upgrade message
+        response["vocab_story"] = {
+            "title": "🌟 Nâng cấp lên PRO",
+            "paragraphs": [get_upgrade_message("vocab_story")],
+            "used_words": [],
+            "upgrade_required": True
+        }
+    
+    # Cloze tests (PRO only)
+    if "cloze_tests" in enabled_features:
+        cloze = feature_results.get("cloze_tests")
+        if cloze:
+            # Post-processing cloze tests (existing logic)
+            valid_cloze = []
+            import re
+            for item in cloze:
+                if not isinstance(item, dict):
+                    continue
+                paragraph = item.get('paragraph', '')
+                blanks = item.get('blanks', [])
+                
+                if not isinstance(blanks, list) or not blanks:
+                    continue
+                
+                blank_count_in_text = len(re.findall(r'___\d+___', paragraph))
+                
+                if blank_count_in_text == 1 and len(blanks) == 1:
+                    valid_cloze.append(item)
+            
+            response["cloze_tests"] = valid_cloze if valid_cloze else fallback.get("cloze_tests")
+        else:
+            response["cloze_tests"] = fallback.get("cloze_tests")
+    else:
+        # Feature disabled
+        response["cloze_tests"] = {
+            "upgrade_required": True,
+            "message": get_upgrade_message("cloze_tests")
+        }
+    
+    # Match pairs (PRO only)
+    if "match_pairs" in enabled_features:
+        match_pairs = feature_results.get("match_pairs")
+        if match_pairs:
+            # Post-processing match pairs (existing logic)
+            valid_pairs = []
+            seen_words = set()
+            for item in match_pairs:
+                if not isinstance(item, dict):
+                    continue
+                word = item.get('word', '')
+                word_key = word.lower().strip()
+                if not word_key or word_key in seen_words:
+                    continue
+                seen_words.add(word_key)
+                valid_pairs.append(item)
+            
+            response["match_pairs"] = valid_pairs if valid_pairs else fallback.get("match_pairs")
+        else:
+            response["match_pairs"] = fallback.get("match_pairs")
+    else:
+        # Feature disabled
+        response["match_pairs"] = {
+            "upgrade_required": True,
+            "message": get_upgrade_message("match_pairs")
+        }
+    
+    # Mindmap (always enabled, generated from summary_table)
+    response["mindmap"] = _generate_mindmap_from_summary_table(response["summary_table"])
+    
+    print(f"[summarizer] Vocab bundle complete for {account_type}: {len([k for k, v in response.items() if v and not isinstance(v, dict) or not v.get('upgrade_required')])} features returned")
+    
+    return response
 
     # Get fallback bundle để fill các phần fail
     fallback = _fallback_vocab_bundle(vocab_words)

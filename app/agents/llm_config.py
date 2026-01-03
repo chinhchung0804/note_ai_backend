@@ -104,7 +104,66 @@ def get_openai_chat_llm(*, temperature: float = 0.2):
     return _langchain_fallback_llm
 
 
+def _build_gemini_chat_llm(*, temperature: float = 0.2):
+    """Build Gemini LangChain chat model for FREE users"""
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY is required for Gemini chat model.")
+    
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    
+    return ChatGoogleGenerativeAI(
+        model=model,
+        google_api_key=api_key,
+        temperature=temperature,
+        timeout=60,
+        max_tokens=4000,
+    )
+
+
 def get_gemini_chat_llm(*, temperature: float = 0.2):
-    raise RuntimeError("Gemini is disabled; use OpenAI chat instead.")
+    """
+    Get Gemini LangChain chat model for FREE users.
+    Uses gemini-2.0-flash-exp (free tier with 20 RPD limit).
+    """
+    return _build_gemini_chat_llm(temperature=temperature)
+
+
+def get_chat_llm_for_account(account_type: str, *, temperature: float = 0.2):
+    """
+    Get appropriate LangChain chat model based on account type.
+    
+    FREE: GPT-4o-mini (paid, 3 notes/day, basic features)
+    PRO: GPT-4 (paid, unlimited, all features)
+    ENTERPRISE: GPT-4 (paid, unlimited, all features, priority support)
+    """
+    from langchain_openai import ChatOpenAI
+    from app.database.models import AccountType
+    
+    api_key = os.getenv('OPENAI_API_KEY') or os.getenv('LANGCHAIN_API_KEY')
+    if not api_key:
+        raise ValueError('OPENAI_API_KEY or LANGCHAIN_API_KEY is required.')
+    
+    base_url = os.getenv('OPENAI_BASE_URL')
+    
+    # FREE users: GPT-4o-mini (cheaper, good quality)
+    if account_type == AccountType.FREE.value or account_type == AccountType.FREE:
+        model = "gpt-4o-mini"
+        print(f"[llm_config] Using GPT-4o-mini for FREE account")
+    # PRO and ENTERPRISE users: GPT-4 (best quality)
+    else:
+        model = "gpt-4o-mini"  # Using gpt-4o-mini for now (can change to gpt-4 later)
+        print(f"[llm_config] Using GPT-4o-mini for {account_type} account")
+    
+    return ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=temperature,
+        timeout=60,
+        max_tokens=4000,
+    )
 
 

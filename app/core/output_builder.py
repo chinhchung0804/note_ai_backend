@@ -13,11 +13,15 @@ def build_output(
     summary_table=None,
     cloze_tests=None,
     match_pairs=None,
+    text_summary=None,
+    files_summaries=None,
 ):
     """
     Chuẩn hóa cấu trúc trả về cho API.
     - `summary`: giữ compatibility (đoạn ngắn 3-5 câu)
     - `summaries`: đầy đủ 3 dạng (1 câu, 3-5 câu, bullet points)
+    - `text_summary`: summary riêng cho text note (khi có cả text + file)
+    - `files_summaries`: array summary riêng cho từng file (khi có cả text + file)
     - `questions`: danh sách câu hỏi tự luận
     - `mcqs`: câu hỏi trắc nghiệm theo độ khó
     """
@@ -52,5 +56,9 @@ def build_output(
         result['cloze_tests'] = cloze_tests
     if match_pairs is not None:
         result['match_pairs'] = match_pairs
+    if text_summary is not None:
+        result['text_summary'] = text_summary
+    if files_summaries is not None:
+        result['files_summaries'] = files_summaries
 
     return result

@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
 import signal
@@ -7,9 +8,33 @@ import asyncio
 load_dotenv()
 
 from app.api.v1.router import router as api_router
+from app.api.routes.auth import router as auth_router
+from app.api.routes.payment import router as payment_router
 
-app = FastAPI(title="Note Summarizer AI Backend", version="1.0.0")
-app.include_router(api_router, prefix="/api/v1")
+app = FastAPI(
+    title="NotallyX AI Backend",
+    version="2.0.0",
+    description="AI-powered note processing with authentication and subscription management"
+)
+
+# CORS middleware configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8080",
+        "https://notallyx.app",
+        "*"  # For development - restrict in production
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(api_router, prefix="/api/v1", tags=["Notes Processing"])
+app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(payment_router, prefix="/api/payment", tags=["Payment & Subscription"])
 
 @app.on_event("startup")
 async def startup_event():

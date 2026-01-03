@@ -129,7 +129,7 @@ async def summarize_text_sync(
     - user_id: User ID để lưu vào database
     - note_id: Custom note ID từ app
     """
-    result = await process_text(note, db=db, use_rag=True)
+    result = await process_text(note, db=db, use_rag=True, account_type="free")  # ⭐ Default to free for this endpoint
     
     if user_id and note_id:
         try:
@@ -172,6 +172,16 @@ async def process_input_sync(
     - user_id: User ID để lưu vào database
     - note_id: Custom note ID từ app
     """
+    # ⭐ Get user's account type for AI model selection
+    account_type = "free"  # Default
+    if user_id:
+        try:
+            user = db_service.get_or_create_user(db, username=user_id)
+            account_type = user.account_type.value if hasattr(user.account_type, 'value') else str(user.account_type)
+            print(f"[router] User {user_id} account_type: {account_type}")
+        except Exception as e:
+            print(f"[router] Error getting user account type: {e}, using default 'free'")
+    
     if file:
         file_content = await file.read()
         await file.seek(0)  
@@ -241,6 +251,7 @@ async def process_input_sync(
             use_rag=True,
             content_type=content_type,
             checked_vocab_items=checked_vocab_items,
+            account_type=account_type,  # ⭐ Pass account_type
         )
         
         if user_id and note_id:
@@ -364,6 +375,7 @@ async def process_input_sync(
             use_rag=True,
             content_type=content_type,
             checked_vocab_items=checked_vocab_items,
+            account_type=account_type,  # ⭐ Pass account_type
         )
         
         if user_id and note_id:
@@ -435,6 +447,16 @@ async def process_combined_endpoint(
     - Nếu note đã tồn tại và nội dung không thay đổi → trả về kết quả đã lưu (không chạy lại AI)
     - Nếu note chưa tồn tại hoặc nội dung đã thay đổi → chạy AI và lưu kết quả mới
     """
+    # ⭐ Get user's account type for AI model selection
+    account_type = "free"  # Default
+    if user_id:
+        try:
+            user = db_service.get_or_create_user(db, username=user_id)
+            account_type = user.account_type.value if hasattr(user.account_type, 'value') else str(user.account_type)
+            print(f"[router] User {user_id} account_type: {account_type}")
+        except Exception as e:
+            print(f"[router] Error getting user account type: {e}, using default 'free'")
+    
     uploads = files if files is not None else []
     has_text = text_note and text_note.strip()
 
@@ -568,7 +590,8 @@ async def process_combined_endpoint(
         db=db,
         use_rag=True,
         content_type=content_type,
-        checked_vocab_items=checked_vocab_items
+        checked_vocab_items=checked_vocab_items,
+        account_type=account_type  # ⭐ Pass account_type
     )
 
     if user_id and note_id:
