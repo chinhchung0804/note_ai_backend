@@ -92,6 +92,7 @@ def get_account_benefits() -> Dict[str, Dict[str, Any]]:
             "name": "FREE",
             "price": "Miễn phí",
             "daily_notes": 3,
+            "daily_notes_description": "3 ghi chú/ngày (tất cả loại: text, checklist, file)",
             "ai_model": "GPT-4o-mini",
             "features": {
                 "basic_summary": True,
@@ -101,6 +102,7 @@ def get_account_benefits() -> Dict[str, Dict[str, Any]]:
                 "vocab_story": True,
                 "cloze_tests": True,
                 "match_pairs": True,
+                "ai_label_suggestion": False,  # PRO only
                 "priority_support": False,
             },
             "vocab_features_list": [
@@ -112,14 +114,16 @@ def get_account_benefits() -> Dict[str, Dict[str, Any]]:
                 "Trò chơi nối từ (Match Pairs)",
             ],
             "limitations": [
-                "Giới hạn 3 ghi chú/ngày",
+                "Giới hạn 3 ghi chú/ngày (tất cả loại)",
                 "AI model: GPT-4o-mini (tốt)",
+                "Tự tạo label thủ công",
             ],
             "benefits": [
                 "✅ Tất cả 6 tính năng vocab",
                 "✅ Xem kết quả học tập đầy đủ",
                 "✅ Vocab Story, Cloze Tests, Match Pairs",
-                "⚠️ Giới hạn 3 notes/ngày",
+                "⚠️ Giới hạn 3 notes/ngày (text + checklist)",
+                "⚠️ Tự tạo label thủ công",
             ]
         },
         "pro": {
@@ -135,6 +139,7 @@ def get_account_benefits() -> Dict[str, Dict[str, Any]]:
                 "vocab_story": True,
                 "cloze_tests": True,
                 "match_pairs": True,
+                "ai_label_suggestion": True,  # PRO exclusive!
                 "priority_support": False,
             },
             "vocab_features_list": [
@@ -145,10 +150,16 @@ def get_account_benefits() -> Dict[str, Dict[str, Any]]:
                 "Bài tập điền từ (Cloze Tests)",
                 "Trò chơi nối từ (Match Pairs)",
             ],
+            "pro_exclusive_features": [
+                "🏷️ AI Label Suggestion - Tự động gợi ý labels",
+                "🔍 Smart Search - Tìm kiếm thông minh",
+                "📊 Learning Analytics - Thống kê học tập",
+            ],
             "benefits": [
                 "✅ Unlimited ghi chú mỗi ngày",
                 "✅ Tất cả 6 tính năng vocab",
                 "✅ AI chất lượng cao (GPT-4o-mini)",
+                "✅ 🏷️ AI Label Suggestion - Tự động phân loại",
                 "✅ Có thể nâng cấp lên GPT-4",
                 "✅ Không giới hạn số lượng",
                 "✅ Phù hợp cho học tập nghiêm túc",
@@ -167,6 +178,7 @@ def get_account_benefits() -> Dict[str, Dict[str, Any]]:
                 "vocab_story": True,
                 "cloze_tests": True,
                 "match_pairs": True,
+                "ai_label_suggestion": True,
                 "priority_support": True,
             },
             "vocab_features_list": [
